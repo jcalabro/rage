@@ -1,0 +1,769 @@
+//! Board state representation.
+//!
+//! The `Board` struct holds the complete state of a chess position:
+//! bitboards, mailbox, side to move, castling rights, en passant, clocks, and Zobrist hash.
+
+use std::fmt;
+
+use crate::attacks;
+use crate::bitboard::Bitboard;
+use crate::types::{CastlingRights, Color, File, Piece, PieceType, Rank, Square};
+use crate::zobrist;
+
+/// Undo information saved before making a move, needed to unmake it.
+#[derive(Clone, Copy, Debug)]
+pub struct UndoInfo {
+    pub captured_piece: Option<PieceType>,
+    pub castling: CastlingRights,
+    pub en_passant: Option<Square>,
+    pub halfmove_clock: u16,
+    pub zobrist: u64,
+}
+
+/// Complete chess position state.
+#[derive(Clone)]
+pub struct Board {
+    /// Bitboards indexed by piece type.
+    piece_bb: [Bitboard; PieceType::NUM],
+    /// Bitboards indexed by color.
+    color_bb: [Bitboard; Color::NUM],
+    /// Mailbox: what piece is on each square (redundant with bitboards for fast lookup).
+    mailbox: [Option<Piece>; Square::NUM],
+    /// Side to move.
+    side_to_move: Color,
+    /// Castling rights.
+    castling: CastlingRights,
+    /// En passant target square (the square a pawn can capture to, not the pawn itself).
+    en_passant: Option<Square>,
+    /// Halfmove clock (for 50-move rule).
+    halfmove_clock: u16,
+    /// Fullmove number (starts at 1, incremented after Black moves).
+    fullmove_number: u16,
+    /// Zobrist hash of the position.
+    zobrist: u64,
+    /// Undo stack for unmake.
+    history: Vec<UndoInfo>,
+}
+
+impl Board {
+    // --- Construction ---
+
+    /// Create an empty board with no pieces.
+    pub fn empty() -> Self {
+        Self {
+            piece_bb: [Bitboard::EMPTY; PieceType::NUM],
+            color_bb: [Bitboard::EMPTY; Color::NUM],
+            mailbox: [None; Square::NUM],
+            side_to_move: Color::White,
+            castling: CastlingRights::NONE,
+            en_passant: None,
+            halfmove_clock: 0,
+            fullmove_number: 1,
+            zobrist: 0,
+            history: Vec::new(),
+        }
+    }
+
+    /// Create the standard starting position.
+    pub fn starting_position() -> Self {
+        // This is safe because the starting FEN is always valid
+        Self::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+            .unwrap_or_else(|_| Self::empty())
+    }
+
+    // --- Piece manipulation ---
+
+    /// Place a piece on a square. Does NOT update Zobrist (use in board setup only).
+    pub fn put_piece(&mut self, piece: Piece, sq: Square) {
+        let bb = Bitboard::from_square(sq);
+        self.piece_bb[piece.piece_type.index()] |= bb;
+        self.color_bb[piece.color.index()] |= bb;
+        self.mailbox[sq.index()] = Some(piece);
+    }
+
+    /// Remove a piece from a square. Does NOT update Zobrist (use in board setup only).
+    pub fn remove_piece(&mut self, sq: Square) {
+        if let Some(piece) = self.mailbox[sq.index()] {
+            let bb = Bitboard::from_square(sq);
+            self.piece_bb[piece.piece_type.index()] &= !bb;
+            self.color_bb[piece.color.index()] &= !bb;
+            self.mailbox[sq.index()] = None;
+        }
+    }
+
+    /// Compute the full Zobrist hash from scratch.
+    pub fn compute_zobrist(&self) -> u64 {
+        let mut hash = 0u64;
+
+        for sq in Square::ALL {
+            if let Some(piece) = self.mailbox[sq.index()] {
+                hash ^= zobrist::piece_key(piece.color, piece.piece_type, sq);
+            }
+        }
+
+        if self.side_to_move == Color::Black {
+            hash ^= zobrist::side_key();
+        }
+
+        hash ^= zobrist::castling_key(self.castling);
+        hash ^= zobrist::ep_key(self.en_passant.map(|sq| sq.file()));
+
+        hash
+    }
+
+    /// Recompute and set the Zobrist hash. Call after manual board setup.
+    pub fn refresh_zobrist(&mut self) {
+        self.zobrist = self.compute_zobrist();
+    }
+
+    // --- Accessors ---
+
+    pub fn piece_bb(&self, pt: PieceType) -> Bitboard {
+        self.piece_bb[pt.index()]
+    }
+
+    pub fn color_bb(&self, color: Color) -> Bitboard {
+        self.color_bb[color.index()]
+    }
+
+    pub fn occupied(&self) -> Bitboard {
+        self.color_bb[0] | self.color_bb[1]
+    }
+
+    pub fn empty_squares(&self) -> Bitboard {
+        !self.occupied()
+    }
+
+    pub fn pieces(&self, color: Color, pt: PieceType) -> Bitboard {
+        self.piece_bb[pt.index()] & self.color_bb[color.index()]
+    }
+
+    pub fn piece_on(&self, sq: Square) -> Option<Piece> {
+        self.mailbox[sq.index()]
+    }
+
+    pub fn side_to_move(&self) -> Color {
+        self.side_to_move
+    }
+
+    pub fn castling_rights(&self) -> CastlingRights {
+        self.castling
+    }
+
+    pub fn en_passant_square(&self) -> Option<Square> {
+        self.en_passant
+    }
+
+    pub fn halfmove_clock(&self) -> u16 {
+        self.halfmove_clock
+    }
+
+    pub fn fullmove_number(&self) -> u16 {
+        self.fullmove_number
+    }
+
+    pub fn zobrist_hash(&self) -> u64 {
+        self.zobrist
+    }
+
+    /// Find the king square for the given color.
+    pub fn king_square(&self, color: Color) -> Square {
+        let king_bb = self.pieces(color, PieceType::King);
+        // There must always be exactly one king per side
+        debug_assert_eq!(king_bb.popcount(), 1);
+        // lsb always returns Some when popcount == 1
+        match king_bb.lsb() {
+            Some(sq) => sq,
+            None => Square::A1, // unreachable in valid positions
+        }
+    }
+
+    /// Check if the given square is attacked by pieces of `by_color`.
+    pub fn is_attacked(&self, sq: Square, by_color: Color) -> bool {
+        let occupied = self.occupied();
+        let them = self.color_bb(by_color);
+
+        if (attacks::pawn_attacks(sq, !by_color) & self.piece_bb(PieceType::Pawn) & them)
+            .is_not_empty()
+        {
+            return true;
+        }
+        if (attacks::knight_attacks(sq) & self.piece_bb(PieceType::Knight) & them).is_not_empty() {
+            return true;
+        }
+        if (attacks::king_attacks(sq) & self.piece_bb(PieceType::King) & them).is_not_empty() {
+            return true;
+        }
+        let bishop_queen =
+            (self.piece_bb(PieceType::Bishop) | self.piece_bb(PieceType::Queen)) & them;
+        if (attacks::bishop_attacks(sq, occupied) & bishop_queen).is_not_empty() {
+            return true;
+        }
+        let rook_queen = (self.piece_bb(PieceType::Rook) | self.piece_bb(PieceType::Queen)) & them;
+        if (attacks::rook_attacks(sq, occupied) & rook_queen).is_not_empty() {
+            return true;
+        }
+        false
+    }
+
+    /// Check if the side to move is in check.
+    pub fn in_check(&self) -> bool {
+        let king_sq = self.king_square(self.side_to_move);
+        self.is_attacked(king_sq, !self.side_to_move)
+    }
+
+    // --- Setters (for FEN parsing) ---
+
+    pub fn set_side_to_move(&mut self, color: Color) {
+        self.side_to_move = color;
+    }
+
+    pub fn set_castling(&mut self, rights: CastlingRights) {
+        self.castling = rights;
+    }
+
+    pub fn set_en_passant(&mut self, sq: Option<Square>) {
+        self.en_passant = sq;
+    }
+
+    pub fn set_halfmove_clock(&mut self, clock: u16) {
+        self.halfmove_clock = clock;
+    }
+
+    pub fn set_fullmove_number(&mut self, num: u16) {
+        self.fullmove_number = num;
+    }
+
+    // --- Make / Unmake ---
+
+    /// Make a move on the board. Returns undo info.
+    /// The move must be legal.
+    pub fn make_move(&mut self, m: crate::moves::Move) -> UndoInfo {
+        let undo = UndoInfo {
+            captured_piece: None,
+            castling: self.castling,
+            en_passant: self.en_passant,
+            halfmove_clock: self.halfmove_clock,
+            zobrist: self.zobrist,
+        };
+        self.history.push(undo);
+
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let us = self.side_to_move;
+        let piece = match self.mailbox[from.index()] {
+            Some(p) => p,
+            None => {
+                // Invalid move - no piece on from square. Should not happen with legal moves.
+                return undo;
+            }
+        };
+        let pt = piece.piece_type;
+        let captured = self.mailbox[to.index()].map(|p| p.piece_type);
+
+        // Update Zobrist: remove old en passant and castling
+        self.zobrist ^= zobrist::ep_key(self.en_passant.map(|sq| sq.file()));
+        self.zobrist ^= zobrist::castling_key(self.castling);
+
+        // Reset en passant
+        self.en_passant = None;
+
+        // Halfmove clock: reset on pawn move or capture, else increment
+        if pt == PieceType::Pawn || captured.is_some() {
+            self.halfmove_clock = 0;
+        } else {
+            self.halfmove_clock += 1;
+        }
+
+        if m.is_en_passant() {
+            // Remove the captured pawn
+            let captured_sq = Square::from_file_rank(to.file(), from.rank());
+            self.zobrist ^= zobrist::piece_key(!us, PieceType::Pawn, captured_sq);
+            self.remove_piece_internal(captured_sq);
+
+            // Move our pawn
+            self.move_piece_internal(from, to, piece);
+
+            // Update undo with captured piece
+            if let Some(last) = self.history.last_mut() {
+                last.captured_piece = Some(PieceType::Pawn);
+            }
+        } else if m.is_castling() {
+            // Move the king
+            self.move_piece_internal(from, to, piece);
+
+            // Move the rook
+            let (rook_from, rook_to) = if to.file() == File::G {
+                // Kingside
+                (
+                    Square::from_file_rank(File::H, from.rank()),
+                    Square::from_file_rank(File::F, from.rank()),
+                )
+            } else {
+                // Queenside
+                (
+                    Square::from_file_rank(File::A, from.rank()),
+                    Square::from_file_rank(File::D, from.rank()),
+                )
+            };
+            let rook = Piece::new(us, PieceType::Rook);
+            self.move_piece_internal(rook_from, rook_to, rook);
+        } else if m.is_promotion() {
+            // Remove captured piece if any
+            if let Some(cap_pt) = captured {
+                self.zobrist ^= zobrist::piece_key(!us, cap_pt, to);
+                self.remove_piece_internal(to);
+            }
+
+            // Remove the pawn from `from`
+            self.zobrist ^= zobrist::piece_key(us, PieceType::Pawn, from);
+            self.remove_piece_internal(from);
+
+            // Place the promoted piece on `to`
+            let promo_piece = Piece::new(us, m.promotion_piece());
+            self.zobrist ^= zobrist::piece_key(us, m.promotion_piece(), to);
+            self.put_piece_internal(to, promo_piece);
+
+            if let Some(last) = self.history.last_mut() {
+                last.captured_piece = captured;
+            }
+        } else {
+            // Normal move or capture
+            if let Some(cap_pt) = captured {
+                self.zobrist ^= zobrist::piece_key(!us, cap_pt, to);
+                self.remove_piece_internal(to);
+            }
+            self.move_piece_internal(from, to, piece);
+
+            // Double pawn push: set en passant square
+            if pt == PieceType::Pawn
+                && ((from.rank() == Rank::R2 && to.rank() == Rank::R4)
+                    || (from.rank() == Rank::R7 && to.rank() == Rank::R5))
+            {
+                let ep_rank = if us == Color::White {
+                    Rank::R3
+                } else {
+                    Rank::R6
+                };
+                self.en_passant = Some(Square::from_file_rank(from.file(), ep_rank));
+            }
+
+            if let Some(last) = self.history.last_mut() {
+                last.captured_piece = captured;
+            }
+        }
+
+        // Update castling rights
+        self.castling = self.castling.update(from, to);
+
+        // Update Zobrist: add new en passant and castling
+        self.zobrist ^= zobrist::ep_key(self.en_passant.map(|sq| sq.file()));
+        self.zobrist ^= zobrist::castling_key(self.castling);
+
+        // Flip side to move
+        self.side_to_move = !self.side_to_move;
+        self.zobrist ^= zobrist::side_key();
+
+        // Fullmove number: increment after Black moves
+        if self.side_to_move == Color::White {
+            self.fullmove_number += 1;
+        }
+
+        undo
+    }
+
+    /// Unmake a move, restoring the board to its previous state.
+    pub fn unmake_move(&mut self, m: crate::moves::Move) {
+        let undo = match self.history.pop() {
+            Some(u) => u,
+            None => return,
+        };
+
+        // Flip side back
+        self.side_to_move = !self.side_to_move;
+        if self.side_to_move == Color::Black {
+            self.fullmove_number -= 1;
+        }
+
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let us = self.side_to_move;
+
+        if m.is_en_passant() {
+            // Move our pawn back
+            let pawn = Piece::new(us, PieceType::Pawn);
+            self.move_piece_internal(to, from, pawn);
+
+            // Restore captured pawn
+            let captured_sq = Square::from_file_rank(to.file(), from.rank());
+            self.put_piece_internal(captured_sq, Piece::new(!us, PieceType::Pawn));
+        } else if m.is_castling() {
+            // Move king back
+            let king = Piece::new(us, PieceType::King);
+            self.move_piece_internal(to, from, king);
+
+            // Move rook back
+            let (rook_from, rook_to) = if to.file() == File::G {
+                (
+                    Square::from_file_rank(File::H, from.rank()),
+                    Square::from_file_rank(File::F, from.rank()),
+                )
+            } else {
+                (
+                    Square::from_file_rank(File::A, from.rank()),
+                    Square::from_file_rank(File::D, from.rank()),
+                )
+            };
+            let rook = Piece::new(us, PieceType::Rook);
+            self.move_piece_internal(rook_to, rook_from, rook);
+        } else if m.is_promotion() {
+            // Remove promoted piece from `to`
+            self.remove_piece_internal(to);
+
+            // Put pawn back on `from`
+            self.put_piece_internal(from, Piece::new(us, PieceType::Pawn));
+
+            // Restore captured piece on `to` if any
+            if let Some(cap_pt) = undo.captured_piece {
+                self.put_piece_internal(to, Piece::new(!us, cap_pt));
+            }
+        } else {
+            // Normal move: move piece back
+            let piece = match self.mailbox[to.index()] {
+                Some(p) => p,
+                None => return,
+            };
+            self.move_piece_internal(to, from, piece);
+
+            // Restore captured piece
+            if let Some(cap_pt) = undo.captured_piece {
+                self.put_piece_internal(to, Piece::new(!us, cap_pt));
+            }
+        }
+
+        // Restore state from undo
+        self.castling = undo.castling;
+        self.en_passant = undo.en_passant;
+        self.halfmove_clock = undo.halfmove_clock;
+        self.zobrist = undo.zobrist;
+    }
+
+    // --- Internal helpers for piece manipulation ---
+
+    fn put_piece_internal(&mut self, sq: Square, piece: Piece) {
+        let bb = Bitboard::from_square(sq);
+        self.piece_bb[piece.piece_type.index()] |= bb;
+        self.color_bb[piece.color.index()] |= bb;
+        self.mailbox[sq.index()] = Some(piece);
+    }
+
+    fn remove_piece_internal(&mut self, sq: Square) {
+        if let Some(piece) = self.mailbox[sq.index()] {
+            let bb = Bitboard::from_square(sq);
+            self.piece_bb[piece.piece_type.index()] &= !bb;
+            self.color_bb[piece.color.index()] &= !bb;
+            self.mailbox[sq.index()] = None;
+        }
+    }
+
+    fn move_piece_internal(&mut self, from: Square, to: Square, piece: Piece) {
+        let from_to = Bitboard::from_square(from) | Bitboard::from_square(to);
+        self.piece_bb[piece.piece_type.index()] ^= from_to;
+        self.color_bb[piece.color.index()] ^= from_to;
+        self.mailbox[from.index()] = None;
+        self.mailbox[to.index()] = Some(piece);
+
+        // Update Zobrist for piece move
+        self.zobrist ^= zobrist::piece_key(piece.color, piece.piece_type, from);
+        self.zobrist ^= zobrist::piece_key(piece.color, piece.piece_type, to);
+    }
+}
+
+// --- FEN parsing and serialization ---
+
+impl Board {
+    /// Standard starting position FEN.
+    pub const STARTPOS_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+    /// Parse a FEN string into a Board.
+    pub fn from_fen(fen: &str) -> crate::Result<Self> {
+        let parts: Vec<&str> = fen.split_whitespace().collect();
+        if parts.len() < 4 {
+            return Err(crate::Error::InvalidFen(
+                "FEN must have at least 4 fields".to_string(),
+            ));
+        }
+
+        let mut board = Board::empty();
+
+        // 1. Piece placement
+        let mut rank = 7i32;
+        let mut file = 0i32;
+        for ch in parts[0].chars() {
+            match ch {
+                '/' => {
+                    rank -= 1;
+                    file = 0;
+                    if rank < 0 {
+                        return Err(crate::Error::InvalidFen("too many ranks".to_string()));
+                    }
+                }
+                '1'..='8' => {
+                    file += (ch as i32) - ('0' as i32);
+                }
+                _ => {
+                    if file >= 8 {
+                        return Err(crate::Error::InvalidFen("too many files".to_string()));
+                    }
+                    let piece = Piece::from_char(ch)
+                        .ok_or_else(|| crate::Error::InvalidFen(format!("invalid piece: {ch}")))?;
+                    let sq = Square::from_file_rank(File::new(file as u8), Rank::new(rank as u8));
+                    board.put_piece(piece, sq);
+                    file += 1;
+                }
+            }
+        }
+
+        // 2. Side to move
+        board.side_to_move = match parts[1] {
+            "w" => Color::White,
+            "b" => Color::Black,
+            _ => {
+                return Err(crate::Error::InvalidFen(format!(
+                    "invalid side to move: {}",
+                    parts[1]
+                )));
+            }
+        };
+
+        // 3. Castling rights
+        board.castling = parts[2].parse()?;
+
+        // 4. En passant
+        if parts[3] == "-" {
+            board.en_passant = None;
+        } else {
+            board.en_passant = Some(parts[3].parse()?);
+        }
+
+        // 5. Halfmove clock (optional)
+        if parts.len() > 4 {
+            board.halfmove_clock = parts[4]
+                .parse::<u16>()
+                .map_err(|e| crate::Error::InvalidFen(format!("invalid halfmove clock: {e}")))?;
+        }
+
+        // 6. Fullmove number (optional)
+        if parts.len() > 5 {
+            board.fullmove_number = parts[5]
+                .parse::<u16>()
+                .map_err(|e| crate::Error::InvalidFen(format!("invalid fullmove number: {e}")))?;
+        }
+
+        board.refresh_zobrist();
+        Ok(board)
+    }
+
+    /// Serialize the board to a FEN string.
+    pub fn to_fen(&self) -> String {
+        let mut fen = String::new();
+
+        // 1. Piece placement
+        for rank in (0..8).rev() {
+            let mut empty = 0;
+            for file in 0..8 {
+                let sq = Square::from_file_rank(File::new(file), Rank::new(rank));
+                match self.mailbox[sq.index()] {
+                    Some(piece) => {
+                        if empty > 0 {
+                            fen.push(char::from(b'0' + empty));
+                            empty = 0;
+                        }
+                        fen.push(piece.to_char());
+                    }
+                    None => {
+                        empty += 1;
+                    }
+                }
+            }
+            if empty > 0 {
+                fen.push(char::from(b'0' + empty));
+            }
+            if rank > 0 {
+                fen.push('/');
+            }
+        }
+
+        // 2. Side to move
+        fen.push(' ');
+        fen.push(self.side_to_move.to_char());
+
+        // 3. Castling rights
+        fen.push(' ');
+        fen.push_str(&self.castling.to_string());
+
+        // 4. En passant
+        fen.push(' ');
+        match self.en_passant {
+            Some(sq) => fen.push_str(&sq.to_string()),
+            None => fen.push('-'),
+        }
+
+        // 5. Halfmove clock
+        fen.push(' ');
+        fen.push_str(&self.halfmove_clock.to_string());
+
+        // 6. Fullmove number
+        fen.push(' ');
+        fen.push_str(&self.fullmove_number.to_string());
+
+        fen
+    }
+}
+
+/// Display the board in a human-readable ASCII format.
+impl fmt::Display for Board {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "  a b c d e f g h")?;
+        for rank in (0..8).rev() {
+            write!(f, "{} ", rank + 1)?;
+            for file in 0..8 {
+                let sq = Square::from_file_rank(File::new(file), Rank::new(rank));
+                match self.mailbox[sq.index()] {
+                    Some(piece) => write!(f, "{} ", piece.to_char())?,
+                    None => write!(f, ". ")?,
+                }
+            }
+            writeln!(f, "{}", rank + 1)?;
+        }
+        writeln!(f, "  a b c d e f g h")?;
+        writeln!(
+            f,
+            "Side: {} | Castling: {} | EP: {} | HM: {} | FM: {}",
+            self.side_to_move,
+            self.castling,
+            self.en_passant.map_or("-".to_string(), |sq| sq.to_string()),
+            self.halfmove_clock,
+            self.fullmove_number,
+        )?;
+        writeln!(f, "Zobrist: 0x{:016x}", self.zobrist)?;
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Board {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Board({})", self.to_fen())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn starting_position_fen_roundtrip() {
+        let board = Board::from_fen(Board::STARTPOS_FEN).unwrap();
+        assert_eq!(board.to_fen(), Board::STARTPOS_FEN);
+    }
+
+    #[test]
+    fn starting_position_pieces() {
+        let board = Board::starting_position();
+        // White has 8 pawns
+        assert_eq!(board.pieces(Color::White, PieceType::Pawn).popcount(), 8);
+        // Black has 8 pawns
+        assert_eq!(board.pieces(Color::Black, PieceType::Pawn).popcount(), 8);
+        // 2 knights each
+        assert_eq!(board.pieces(Color::White, PieceType::Knight).popcount(), 2);
+        assert_eq!(board.pieces(Color::Black, PieceType::Knight).popcount(), 2);
+        // Kings
+        assert_eq!(board.king_square(Color::White), Square::E1);
+        assert_eq!(board.king_square(Color::Black), Square::E8);
+        // 32 total pieces
+        assert_eq!(board.occupied().popcount(), 32);
+        // White to move
+        assert_eq!(board.side_to_move(), Color::White);
+        // All castling rights
+        assert_eq!(board.castling_rights(), CastlingRights::ALL);
+    }
+
+    #[test]
+    fn fen_with_en_passant() {
+        let fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.en_passant_square(), Some(Square::E3));
+        assert_eq!(board.side_to_move(), Color::Black);
+        assert_eq!(board.to_fen(), fen);
+    }
+
+    #[test]
+    fn fen_no_castling() {
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.castling_rights(), CastlingRights::NONE);
+        assert_eq!(board.to_fen(), fen);
+    }
+
+    #[test]
+    fn fen_complex_position() {
+        // Kiwipete position
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.to_fen(), fen);
+    }
+
+    #[test]
+    fn zobrist_consistency() {
+        let board = Board::starting_position();
+        assert_eq!(board.zobrist_hash(), board.compute_zobrist());
+    }
+
+    #[test]
+    fn zobrist_different_positions() {
+        let board1 = Board::starting_position();
+        let board2 =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1").unwrap();
+        assert_ne!(board1.zobrist_hash(), board2.zobrist_hash());
+    }
+
+    #[test]
+    fn in_check_detection() {
+        // White king on e1 with black rook on e8, no blockers on e-file
+        let board = Board::from_fen("4r3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(board.in_check());
+
+        // Starting position - not in check
+        let board = Board::starting_position();
+        assert!(!board.in_check());
+    }
+
+    #[test]
+    fn mailbox_bitboard_consistency() {
+        let board = Board::starting_position();
+        for sq in Square::ALL {
+            let has_piece = board.piece_on(sq).is_some();
+            let in_occupied = board.occupied().contains(sq);
+            assert_eq!(has_piece, in_occupied, "inconsistency on {sq}");
+
+            if let Some(piece) = board.piece_on(sq) {
+                assert!(
+                    board.pieces(piece.color, piece.piece_type).contains(sq),
+                    "piece {piece} on {sq} not in correct bitboard"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_fen_rejected() {
+        assert!(Board::from_fen("").is_err());
+        assert!(Board::from_fen("not a fen").is_err());
+        assert!(Board::from_fen("8/8/8/8/8/8/8/8 x KQkq - 0 1").is_err());
+    }
+}

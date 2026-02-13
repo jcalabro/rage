@@ -1,0 +1,14 @@
+[package]
+name = "rage-engine"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rage"
+path = "src/main.rs"
+
+[dependencies]
+rage-core = { path = "../rage-core" }

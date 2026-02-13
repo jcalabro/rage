@@ -1,6 +1,21 @@
-[package]
-name = "rage"
+[workspace]
+resolver = "3"
+members = [
+    "crates/rage-core",
+    "crates/rage-engine",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.lints.clippy]
+all = "deny"
+panic = "deny"
+todo = "deny"
+expect_used = "deny"
+unwrap_used = "deny"
+undocumented_unsafe_blocks = "deny"
+
+[workspace.lints.rust]
+dead_code = "allow"

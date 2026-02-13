@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Rage is a UCI-compliant chess engine written in pure Rust targeting top-5 engine strength. It uses NNUE evaluation (HalfKAv2), alpha-beta search with Lazy SMP parallelism, and ships configurable model weights. See @DESIGN.md for the full specification.
+Rage is a general purpose chess library and UCI-compliant chess engine written in pure Rust targeting top-5 engine strength. It uses NNUE evaluation (HalfKAv2), alpha-beta search with Lazy SMP parallelism, and ships configurable model weights. See @DESIGN.md for the full specification.
 
 ## Build & Development Commands
 
@@ -50,4 +50,4 @@ Strict clippy lints are enforced project-wide (see `main.rs` attributes):
 - **Wasm-compatible**: rage-core, rage-nnue, and rage-search must compile to wasm32. No platform-specific code outside of cfg-gated SIMD modules.
 - **No heap allocation in hot paths**: search loop and NNUE inference use stack-allocated structures
 - **Lock-free parallelism**: transposition table uses AtomicU64 with Relaxed ordering; per-thread search stacks and history tables avoid contention
-- **Well-tested**: we are very rigorous about unit, integration, and performance testing. We don't write meaningless tests. When doing performance analysis, we use sound statistical methods.
+- **Well-tested**: we are very rigorous about unit, integration, and performance testing. We don't write meaningless tests. When doing performance analysis, we use sound statistical methods. Tests must be fast to run.
