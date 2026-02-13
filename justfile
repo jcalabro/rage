@@ -15,9 +15,13 @@ lint:
 fmt:
     cargo fmt
 
-# Runs all tests
+# Runs fast tests (skips #[ignore] tests)
 test *ARGS:
     cargo test {{ARGS}}
+
+# Runs all tests including slow perft suites
+test-long *ARGS:
+    cargo test {{ARGS}} -- --include-ignored
 
 # Runs all tests with verbose logging
 testv *ARGS:

@@ -355,12 +355,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn perft_startpos_depth4() {
         let board = Board::starting_position();
         assert_eq!(perft(&board, 4), 197_281);
     }
 
     #[test]
+    #[ignore]
     fn perft_startpos_depth5() {
         let board = Board::starting_position();
         assert_eq!(perft(&board, 5), 4_865_609);
@@ -388,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn perft_kiwipete_depth4() {
         let board = Board::from_fen(KIWIPETE).unwrap();
         assert_eq!(perft(&board, 4), 4_085_603);
@@ -415,12 +418,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn perft_position3_depth4() {
         let board = Board::from_fen(POSITION3).unwrap();
         assert_eq!(perft(&board, 4), 43_238);
     }
 
     #[test]
+    #[ignore]
     fn perft_position3_depth5() {
         let board = Board::from_fen(POSITION3).unwrap();
         assert_eq!(perft(&board, 5), 674_624);
@@ -448,6 +453,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn perft_position4_depth4() {
         let board = Board::from_fen(POSITION4).unwrap();
         assert_eq!(perft(&board, 4), 422_333);
@@ -475,6 +481,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn perft_position5_depth4() {
         let board = Board::from_fen(POSITION5).unwrap();
         assert_eq!(perft(&board, 4), 2_103_487);
@@ -503,6 +510,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn perft_position6_depth4() {
         let board = Board::from_fen(POSITION6).unwrap();
         assert_eq!(perft(&board, 4), 3_894_594);
@@ -553,6 +561,7 @@ mod tests {
 
     // Same test but at depth 2 (covers all first-move responses)
     #[test]
+    #[ignore]
     fn zobrist_incremental_depth2() {
         let board = Board::starting_position();
         let moves = board.generate_legal_moves();

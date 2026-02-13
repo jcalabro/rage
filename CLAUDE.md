@@ -12,7 +12,8 @@ All common tasks go through `just` (justfile):
 
 - `just` — format, lint, and test (default)
 - `just build` — build the project
-- `just test` — run all tests
+- `just test` — run fast tests (skips `#[ignore]` tests)
+- `just test-long` — run all tests including slow perft suites
 - `just test <name>` — run a single test by name (passes args to `cargo test`)
 - `just testv <name>` — run tests with output visible (`--no-capture`)
 - `just lint` — run clippy with `-D warnings`

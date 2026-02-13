@@ -1,7 +1,8 @@
 //! Precomputed attack tables for all piece types.
 //!
 //! - Knight, king, pawn: simple lookup tables computed at compile time.
-//! - Bishop, rook: magic bitboard tables initialized lazily at first use.
+//! - Bishop, rook: magic bitboard tables initialized lazily at first use
+//!   using hardcoded magic numbers (no brute-force search at startup).
 
 use std::sync::LazyLock;
 
@@ -16,16 +17,12 @@ const fn compute_knight_attacks(sq: u8) -> u64 {
     let bb = 1u64 << sq;
     let mut attacks = 0u64;
 
-    // Two ranks up, one file left/right
-    attacks |= (bb << 17) & !0x0101_0101_0101_0101; // +2 ranks, +1 file (not A-file)
-    attacks |= (bb << 15) & !0x8080_8080_8080_8080; // +2 ranks, -1 file (not H-file)
-    // Two ranks down, one file left/right
+    attacks |= (bb << 17) & !0x0101_0101_0101_0101; // +2 ranks, +1 file
+    attacks |= (bb << 15) & !0x8080_8080_8080_8080; // +2 ranks, -1 file
     attacks |= (bb >> 15) & !0x0101_0101_0101_0101; // -2 ranks, +1 file
     attacks |= (bb >> 17) & !0x8080_8080_8080_8080; // -2 ranks, -1 file
-    // One rank up, two files left/right
-    attacks |= (bb << 10) & !0x0303_0303_0303_0303; // +1 rank, +2 files (not AB-files)
-    attacks |= (bb << 6) & !0xC0C0_C0C0_C0C0_C0C0; // +1 rank, -2 files (not GH-files)
-    // One rank down, two files left/right
+    attacks |= (bb << 10) & !0x0303_0303_0303_0303; // +1 rank, +2 files
+    attacks |= (bb << 6) & !0xC0C0_C0C0_C0C0_C0C0; // +1 rank, -2 files
     attacks |= (bb >> 6) & !0x0303_0303_0303_0303; // -1 rank, +2 files
     attacks |= (bb >> 10) & !0xC0C0_C0C0_C0C0_C0C0; // -1 rank, -2 files
 
@@ -42,7 +39,6 @@ const KNIGHT_ATTACKS: [Bitboard; 64] = {
     table
 };
 
-/// Get knight attack bitboard for a given square.
 pub fn knight_attacks(sq: Square) -> Bitboard {
     KNIGHT_ATTACKS[sq.index()]
 }
@@ -57,14 +53,14 @@ const fn compute_king_attacks(sq: u8) -> u64 {
     let not_a = !0x0101_0101_0101_0101u64;
     let not_h = !0x8080_8080_8080_8080u64;
 
-    attacks |= bb << 8; // north
-    attacks |= bb >> 8; // south
-    attacks |= (bb << 1) & not_a; // east
-    attacks |= (bb >> 1) & not_h; // west
-    attacks |= (bb << 9) & not_a; // north-east
-    attacks |= (bb << 7) & not_h; // north-west
-    attacks |= (bb >> 7) & not_a; // south-east
-    attacks |= (bb >> 9) & not_h; // south-west
+    attacks |= bb << 8;
+    attacks |= bb >> 8;
+    attacks |= (bb << 1) & not_a;
+    attacks |= (bb >> 1) & not_h;
+    attacks |= (bb << 9) & not_a;
+    attacks |= (bb << 7) & not_h;
+    attacks |= (bb >> 7) & not_a;
+    attacks |= (bb >> 9) & not_h;
 
     attacks
 }
@@ -79,7 +75,6 @@ const KING_ATTACKS: [Bitboard; 64] = {
     table
 };
 
-/// Get king attack bitboard for a given square.
 pub fn king_attacks(sq: Square) -> Bitboard {
     KING_ATTACKS[sq.index()]
 }
@@ -113,7 +108,6 @@ const PAWN_ATTACKS: [[Bitboard; 64]; 2] = {
     table
 };
 
-/// Get pawn attack bitboard for a given square and color.
 pub fn pawn_attacks(sq: Square, color: Color) -> Bitboard {
     PAWN_ATTACKS[color.index()][sq.index()]
 }
@@ -121,6 +115,49 @@ pub fn pawn_attacks(sq: Square, color: Color) -> Bitboard {
 // ---------------------------------------------------------------------------
 // Magic bitboards for sliding pieces (bishop, rook)
 // ---------------------------------------------------------------------------
+
+// Hardcoded magic numbers. These were found via PRNG search and produce
+// collision-free lookup tables for all 64 squares.
+
+#[rustfmt::skip]
+const BISHOP_MAGICS: [u64; 64] = [
+    0x004002042c102041, 0x0002104200810109, 0x0141412201824004, 0x04082080208c0000,
+    0x2004042040181000, 0x4003090840800138, 0x0027008210410511, 0x0602440404010461,
+    0x0060040890240680, 0x0200115011084082, 0x0800c10401005104, 0x0042044502000010,
+    0x0100040420402008, 0xc140808230414100, 0x2040007402201000, 0x8006008200900402,
+    0x504000a004440088, 0x2820900801010200, 0x0004000804240110, 0x222800040218a211,
+    0x0811020820080009, 0x4802000101008220, 0x0209000a88095040, 0x8082008316411400,
+    0x0220202308020410, 0x801030110a160612, 0x2800300082048601, 0x0010802008020120,
+    0x0044840150802002, 0x0000802206021000, 0x8002205000841000, 0x8020550002411800,
+    0x040120088010100a, 0x0021100281300480, 0x1180208808100420, 0x0044400821020200,
+    0x200a0084000a0220, 0x0001100080610042, 0x1004409200040100, 0x0102040023404200,
+    0x88010188200040a0, 0x0100480804008800, 0x01200a0090080200, 0x000e004010480200,
+    0x184222200a000100, 0x0208095801210200, 0x2210010101004420, 0x0022044910211a02,
+    0x0104050111110000, 0x002200a208020080, 0x0004044200900000, 0x2061140042020320,
+    0x0000948821070012, 0x0000080308420020, 0x4008101102240405, 0x0010220851002000,
+    0x3100840452022040, 0x0000108044022004, 0x0412080042080404, 0x0023088010840401,
+    0x0009108010020880, 0x0320000810018202, 0x0708600304480088, 0x2490045000802100,
+];
+
+#[rustfmt::skip]
+const ROOK_MAGICS: [u64; 64] = [
+    0x0100102100408000, 0x0840004010002000, 0x0200200a00401080, 0x8b00100100040820,
+    0x4a00141e00982010, 0x0b00020900080c00, 0x2580010002000080, 0x018008d100022080,
+    0x0120800028401080, 0x8000c00050002002, 0x1000802000801000, 0x8001000810010021,
+    0x0000808008000400, 0x0001800201800400, 0x0004808011000200, 0x2812000100804402,
+    0x8480004000402002, 0x0030134020004000, 0x8400808020001004, 0x2411010008201005,
+    0x9404008080040800, 0x0112808004000200, 0x2001040008702241, 0x0252020000804104,
+    0x6080004140022000, 0x0020200080804000, 0x0200802200104a00, 0x4100080080801000,
+    0x0000080080040080, 0x8000040080020080, 0x020100210002005c, 0x00088c020014a441,
+    0x0204400284800020, 0x0010201000404000, 0x0048200041001504, 0x00b2841000800800,
+    0x0060110005004800, 0x0000104008010420, 0x1481000405000a00, 0x0040004882001504,
+    0x1000209040008008, 0x0000402010014000, 0x0002001040820028, 0x4a01001000090021,
+    0x0211001008010004, 0x0119000400090052, 0x0a00040200010100, 0x0015012080420004,
+    0x0880004000200040, 0x1400810040002100, 0x0501004810200100, 0x4908800800100080,
+    0x1020208100401002, 0x0001000208040100, 0x1101800100020080, 0x0120800041002080,
+    0x00160100c060d086, 0x08c1002204428016, 0x0004c02012020882, 0x004a700020c80d01,
+    0x0441001004020801, 0x401d000400020801, 0x8c5a011002080084, 0x102004050c204482,
+];
 
 struct MagicEntry {
     mask: u64,
@@ -137,14 +174,11 @@ struct MagicTables {
 }
 
 /// Compute the relevant blocker mask for a bishop on `sq`.
-/// Excludes edge squares since blockers on edges don't affect the attack pattern
-/// (the ray always stops at the edge).
 fn bishop_mask(sq: u8) -> u64 {
     let rank = (sq / 8) as i32;
     let file = (sq % 8) as i32;
     let mut mask = 0u64;
 
-    // Four diagonal directions, stopping one square before the edge
     for &(dr, df) in &[(1, 1), (1, -1), (-1, 1), (-1, -1)] {
         let mut r = rank + dr;
         let mut f = file + df;
@@ -163,7 +197,6 @@ fn rook_mask(sq: u8) -> u64 {
     let file = (sq % 8) as i32;
     let mut mask = 0u64;
 
-    // Four cardinal directions, stopping one square before the edge
     for r in (rank + 1)..7 {
         mask |= 1u64 << (r * 8 + file);
     }
@@ -179,7 +212,7 @@ fn rook_mask(sq: u8) -> u64 {
     mask
 }
 
-/// Compute bishop attacks from `sq` given `occupied` blockers (including edges).
+/// Compute bishop attacks from `sq` given `occupied` blockers.
 fn bishop_attacks_slow(sq: u8, occupied: u64) -> u64 {
     let rank = (sq / 8) as i32;
     let file = (sq % 8) as i32;
@@ -201,7 +234,7 @@ fn bishop_attacks_slow(sq: u8, occupied: u64) -> u64 {
     attacks
 }
 
-/// Compute rook attacks from `sq` given `occupied` blockers (including edges).
+/// Compute rook attacks from `sq` given `occupied` blockers.
 fn rook_attacks_slow(sq: u8, occupied: u64) -> u64 {
     let rank = (sq / 8) as i32;
     let file = (sq % 8) as i32;
@@ -223,97 +256,43 @@ fn rook_attacks_slow(sq: u8, occupied: u64) -> u64 {
     attacks
 }
 
-/// Enumerate the n-th subset of a bitmask using the Carry-Rippler trick.
-/// Returns all subsets when iterated: start with 0, call repeatedly with the
-/// previous result until it wraps back to 0.
+/// Enumerate the next subset of a mask using the Carry-Rippler trick.
 const fn next_subset(subset: u64, mask: u64) -> u64 {
     subset.wrapping_sub(mask) & mask
 }
 
-/// Simple xorshift64 PRNG for magic number generation.
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    x
-}
-
-/// Generate a sparse random number suitable for use as a magic number.
-fn sparse_random(rng: &mut u64) -> u64 {
-    xorshift64(rng) & xorshift64(rng) & xorshift64(rng)
-}
-
-/// Find a magic number for a given square with the given mask and attack function.
-fn find_magic(
-    sq: u8,
-    mask: u64,
-    attacks_fn: fn(u8, u64) -> u64,
-    rng: &mut u64,
-) -> (u64, Vec<Bitboard>) {
+/// Build the attack lookup table for one square given a known magic number.
+fn build_table(sq: u8, mask: u64, magic: u64, attacks_fn: fn(u8, u64) -> u64) -> Vec<Bitboard> {
     let bits = mask.count_ones();
     let size = 1usize << bits;
     let shift = 64 - bits as u8;
+    let mut table = vec![Bitboard::EMPTY; size];
 
-    // Enumerate all blocker configurations and their corresponding attacks
-    let mut blockers = Vec::with_capacity(size);
-    let mut attacks = Vec::with_capacity(size);
     let mut subset = 0u64;
     loop {
-        blockers.push(subset);
-        attacks.push(Bitboard::new(attacks_fn(sq, subset)));
+        let index = (subset.wrapping_mul(magic) >> shift) as usize;
+        table[index] = Bitboard::new(attacks_fn(sq, subset));
         subset = next_subset(subset, mask);
         if subset == 0 {
             break;
         }
     }
-
-    // Try random magic numbers until we find one with no collisions
-    let mut table = vec![Bitboard::EMPTY; size];
-    loop {
-        let magic = sparse_random(rng);
-        // Quick rejection: the magic must map the mask's high bits well
-        if ((mask.wrapping_mul(magic)) >> 56).count_ones() < 6 {
-            continue;
-        }
-
-        // Clear table
-        table.fill(Bitboard::EMPTY);
-
-        let mut ok = true;
-        for i in 0..blockers.len() {
-            let index = (blockers[i].wrapping_mul(magic) >> shift) as usize;
-            if table[index].is_empty() {
-                table[index] = attacks[i];
-            } else if table[index] != attacks[i] {
-                ok = false;
-                break;
-            }
-            // Constructive collision (same attack set) is fine
-        }
-
-        if ok {
-            return (magic, table);
-        }
-    }
+    table
 }
 
 fn init_magic_tables() -> MagicTables {
-    // Fixed seed for deterministic startup
-    let mut rng = 0x1234_5678_9ABC_DEF0u64;
-
     let mut bishop_entries: Vec<MagicEntry> = Vec::with_capacity(64);
     let mut rook_entries: Vec<MagicEntry> = Vec::with_capacity(64);
-    let mut bishop_attacks = Vec::new();
-    let mut rook_attacks = Vec::new();
+    let mut bishop_attacks_vec = Vec::new();
+    let mut rook_attacks_vec = Vec::new();
 
     for sq in 0u8..64 {
         let mask = bishop_mask(sq);
+        let magic = BISHOP_MAGICS[sq as usize];
         let bits = mask.count_ones();
-        let offset = bishop_attacks.len();
-        let (magic, table) = find_magic(sq, mask, bishop_attacks_slow, &mut rng);
-        bishop_attacks.extend_from_slice(&table);
+        let offset = bishop_attacks_vec.len();
+        let table = build_table(sq, mask, magic, bishop_attacks_slow);
+        bishop_attacks_vec.extend_from_slice(&table);
         bishop_entries.push(MagicEntry {
             mask,
             magic,
@@ -324,10 +303,11 @@ fn init_magic_tables() -> MagicTables {
 
     for sq in 0u8..64 {
         let mask = rook_mask(sq);
+        let magic = ROOK_MAGICS[sq as usize];
         let bits = mask.count_ones();
-        let offset = rook_attacks.len();
-        let (magic, table) = find_magic(sq, mask, rook_attacks_slow, &mut rng);
-        rook_attacks.extend_from_slice(&table);
+        let offset = rook_attacks_vec.len();
+        let table = build_table(sq, mask, magic, rook_attacks_slow);
+        rook_attacks_vec.extend_from_slice(&table);
         rook_entries.push(MagicEntry {
             mask,
             magic,
@@ -345,8 +325,8 @@ fn init_magic_tables() -> MagicTables {
             .try_into()
             .ok()
             .unwrap_or_else(|| unreachable!()),
-        bishop_attacks,
-        rook_attacks,
+        bishop_attacks: bishop_attacks_vec,
+        rook_attacks: rook_attacks_vec,
     }
 }
 
@@ -440,12 +420,10 @@ mod tests {
 
     #[test]
     fn pawn_attacks_edge() {
-        // a-file pawn only attacks one square
         let attacks = pawn_attacks(Square::A2, Color::White);
         assert_eq!(attacks.popcount(), 1);
         assert!(attacks.contains(Square::B3));
 
-        // h-file pawn only attacks one square
         let attacks = pawn_attacks(Square::H7, Color::Black);
         assert_eq!(attacks.popcount(), 1);
         assert!(attacks.contains(Square::G6));
@@ -454,19 +432,13 @@ mod tests {
     #[test]
     fn bishop_attacks_empty_board() {
         let attacks = bishop_attacks(Square::E4, Bitboard::EMPTY);
-        // From e4, bishop can reach: d5,c6,b7,a8, f5,g6,h7, d3,c2,b1, f3,g2,h1 = 13
         assert_eq!(attacks.popcount(), 13);
     }
 
     #[test]
     fn bishop_attacks_blocked() {
-        // Place blockers on c6 and f3
         let occupied = Bitboard::from_square(Square::C6) | Bitboard::from_square(Square::F3);
         let attacks = bishop_attacks(Square::E4, occupied);
-        // NW diagonal: d5, c6 (blocked, includes c6)
-        // NE diagonal: f5, g6, h7
-        // SW diagonal: d3, c2, b1
-        // SE diagonal: f3 (blocked, includes f3)
         assert!(attacks.contains(Square::D5));
         assert!(attacks.contains(Square::C6));
         assert!(!attacks.contains(Square::B7));
@@ -478,7 +450,6 @@ mod tests {
     #[test]
     fn rook_attacks_empty_board() {
         let attacks = rook_attacks(Square::E4, Bitboard::EMPTY);
-        // 7 squares in each direction on rank and file = 14
         assert_eq!(attacks.popcount(), 14);
     }
 
@@ -486,15 +457,12 @@ mod tests {
     fn rook_attacks_blocked() {
         let occupied = Bitboard::from_square(Square::E6) | Bitboard::from_square(Square::C4);
         let attacks = rook_attacks(Square::E4, occupied);
-        // North: e5, e6 (blocked)
         assert!(attacks.contains(Square::E5));
         assert!(attacks.contains(Square::E6));
         assert!(!attacks.contains(Square::E7));
-        // West: d4, c4 (blocked)
         assert!(attacks.contains(Square::D4));
         assert!(attacks.contains(Square::C4));
         assert!(!attacks.contains(Square::B4));
-        // South and east: unblocked
         assert!(attacks.contains(Square::E1));
         assert!(attacks.contains(Square::H4));
     }
@@ -510,7 +478,6 @@ mod tests {
 
     #[test]
     fn bishop_attacks_all_squares_nonempty() {
-        // Every square should have at least some bishop attacks on an empty board
         for sq in Square::ALL {
             let attacks = bishop_attacks(sq, Bitboard::EMPTY);
             assert!(attacks.is_not_empty(), "bishop on {sq} has no attacks");
@@ -519,7 +486,6 @@ mod tests {
 
     #[test]
     fn rook_attacks_all_squares_14() {
-        // On an empty board, every rook has exactly 14 attack squares
         for sq in Square::ALL {
             let attacks = rook_attacks(sq, Bitboard::EMPTY);
             assert_eq!(
@@ -533,8 +499,6 @@ mod tests {
 
     #[test]
     fn magic_tables_consistency() {
-        // Verify magic table results match the slow reference implementation
-        // for a sample of positions
         let test_squares = [0u8, 7, 27, 36, 56, 63];
         let test_occupancies = [
             0u64,
