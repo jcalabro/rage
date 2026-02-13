@@ -236,30 +236,39 @@ impl Board {
 
     // --- Make / Unmake ---
 
-    /// Make a move on the board. Returns undo info.
-    /// The move must be legal.
-    pub fn make_move(&mut self, m: crate::moves::Move) -> UndoInfo {
-        let undo = UndoInfo {
-            captured_piece: None,
+    /// Make a move on the board. The move must be legal.
+    pub fn make_move(&mut self, m: crate::moves::Move) {
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let us = self.side_to_move;
+
+        // The piece on the from-square must exist for any legal move.
+        debug_assert!(
+            self.mailbox[from.index()].is_some(),
+            "make_move: no piece on {from}"
+        );
+        let piece = match self.mailbox[from.index()] {
+            Some(p) => p,
+            None => return,
+        };
+        let pt = piece.piece_type;
+        let captured = self.mailbox[to.index()].map(|p| p.piece_type);
+
+        // Determine the captured piece type for undo (en passant is always a pawn).
+        let undo_captured = if m.is_en_passant() {
+            Some(PieceType::Pawn)
+        } else {
+            captured
+        };
+
+        // Save undo info with all fields fully populated.
+        self.history.push(UndoInfo {
+            captured_piece: undo_captured,
             castling: self.castling,
             en_passant: self.en_passant,
             halfmove_clock: self.halfmove_clock,
             zobrist: self.zobrist,
-        };
-        self.history.push(undo);
-
-        let from = m.from_sq();
-        let to = m.to_sq();
-        let us = self.side_to_move;
-        let piece = match self.mailbox[from.index()] {
-            Some(p) => p,
-            None => {
-                // Invalid move - no piece on from square. Should not happen with legal moves.
-                return undo;
-            }
-        };
-        let pt = piece.piece_type;
-        let captured = self.mailbox[to.index()].map(|p| p.piece_type);
+        });
 
         // Update Zobrist: remove old en passant and castling
         self.zobrist ^= zobrist::ep_key(self.en_passant.map(|sq| sq.file()));
@@ -278,29 +287,21 @@ impl Board {
         if m.is_en_passant() {
             // Remove the captured pawn
             let captured_sq = Square::from_file_rank(to.file(), from.rank());
-            self.zobrist ^= zobrist::piece_key(!us, PieceType::Pawn, captured_sq);
             self.remove_piece_internal(captured_sq);
 
             // Move our pawn
             self.move_piece_internal(from, to, piece);
-
-            // Update undo with captured piece
-            if let Some(last) = self.history.last_mut() {
-                last.captured_piece = Some(PieceType::Pawn);
-            }
         } else if m.is_castling() {
             // Move the king
             self.move_piece_internal(from, to, piece);
 
             // Move the rook
             let (rook_from, rook_to) = if to.file() == File::G {
-                // Kingside
                 (
                     Square::from_file_rank(File::H, from.rank()),
                     Square::from_file_rank(File::F, from.rank()),
                 )
             } else {
-                // Queenside
                 (
                     Square::from_file_rank(File::A, from.rank()),
                     Square::from_file_rank(File::D, from.rank()),
@@ -310,32 +311,25 @@ impl Board {
             self.move_piece_internal(rook_from, rook_to, rook);
         } else if m.is_promotion() {
             // Remove captured piece if any
-            if let Some(cap_pt) = captured {
-                self.zobrist ^= zobrist::piece_key(!us, cap_pt, to);
+            if captured.is_some() {
                 self.remove_piece_internal(to);
             }
 
             // Remove the pawn from `from`
-            self.zobrist ^= zobrist::piece_key(us, PieceType::Pawn, from);
             self.remove_piece_internal(from);
 
             // Place the promoted piece on `to`
             let promo_piece = Piece::new(us, m.promotion_piece());
-            self.zobrist ^= zobrist::piece_key(us, m.promotion_piece(), to);
             self.put_piece_internal(to, promo_piece);
-
-            if let Some(last) = self.history.last_mut() {
-                last.captured_piece = captured;
-            }
         } else {
             // Normal move or capture
-            if let Some(cap_pt) = captured {
-                self.zobrist ^= zobrist::piece_key(!us, cap_pt, to);
+            if captured.is_some() {
                 self.remove_piece_internal(to);
             }
             self.move_piece_internal(from, to, piece);
 
-            // Double pawn push: set en passant square
+            // Double pawn push: set en passant square only if an enemy pawn
+            // can actually capture (strict per FIDE rules / improves TT hits).
             if pt == PieceType::Pawn
                 && ((from.rank() == Rank::R2 && to.rank() == Rank::R4)
                     || (from.rank() == Rank::R7 && to.rank() == Rank::R5))
@@ -345,11 +339,12 @@ impl Board {
                 } else {
                     Rank::R6
                 };
-                self.en_passant = Some(Square::from_file_rank(from.file(), ep_rank));
-            }
-
-            if let Some(last) = self.history.last_mut() {
-                last.captured_piece = captured;
+                let ep_sq = Square::from_file_rank(from.file(), ep_rank);
+                // Only record EP if an enemy pawn can actually capture on the EP square.
+                let enemy_pawns = self.pieces(!us, PieceType::Pawn);
+                if (attacks::pawn_attacks(ep_sq, us) & enemy_pawns).is_not_empty() {
+                    self.en_passant = Some(ep_sq);
+                }
             }
         }
 
@@ -368,8 +363,6 @@ impl Board {
         if self.side_to_move == Color::White {
             self.fullmove_number += 1;
         }
-
-        undo
     }
 
     /// Unmake a move, restoring the board to its previous state.
@@ -450,30 +443,33 @@ impl Board {
 
     // --- Internal helpers for piece manipulation ---
 
+    /// Place a piece on a square, updating bitboards, mailbox, and Zobrist.
     fn put_piece_internal(&mut self, sq: Square, piece: Piece) {
         let bb = Bitboard::from_square(sq);
         self.piece_bb[piece.piece_type.index()] |= bb;
         self.color_bb[piece.color.index()] |= bb;
         self.mailbox[sq.index()] = Some(piece);
+        self.zobrist ^= zobrist::piece_key(piece.color, piece.piece_type, sq);
     }
 
+    /// Remove whatever piece is on a square, updating bitboards, mailbox, and Zobrist.
     fn remove_piece_internal(&mut self, sq: Square) {
         if let Some(piece) = self.mailbox[sq.index()] {
             let bb = Bitboard::from_square(sq);
             self.piece_bb[piece.piece_type.index()] &= !bb;
             self.color_bb[piece.color.index()] &= !bb;
             self.mailbox[sq.index()] = None;
+            self.zobrist ^= zobrist::piece_key(piece.color, piece.piece_type, sq);
         }
     }
 
+    /// Move a piece from one square to another, updating bitboards, mailbox, and Zobrist.
     fn move_piece_internal(&mut self, from: Square, to: Square, piece: Piece) {
         let from_to = Bitboard::from_square(from) | Bitboard::from_square(to);
         self.piece_bb[piece.piece_type.index()] ^= from_to;
         self.color_bb[piece.color.index()] ^= from_to;
         self.mailbox[from.index()] = None;
         self.mailbox[to.index()] = Some(piece);
-
-        // Update Zobrist for piece move
         self.zobrist ^= zobrist::piece_key(piece.color, piece.piece_type, from);
         self.zobrist ^= zobrist::piece_key(piece.color, piece.piece_type, to);
     }
@@ -497,30 +493,44 @@ impl Board {
         let mut board = Board::empty();
 
         // 1. Piece placement
-        let mut rank = 7i32;
-        let mut file = 0i32;
-        for ch in parts[0].chars() {
-            match ch {
-                '/' => {
-                    rank -= 1;
-                    file = 0;
-                    if rank < 0 {
-                        return Err(crate::Error::InvalidFen("too many ranks".to_string()));
+        let ranks: Vec<&str> = parts[0].split('/').collect();
+        if ranks.len() != 8 {
+            return Err(crate::Error::InvalidFen(format!(
+                "expected 8 ranks, got {}",
+                ranks.len()
+            )));
+        }
+        for (rank_idx, rank_str) in ranks.iter().rev().enumerate() {
+            let mut file = 0i32;
+            for ch in rank_str.chars() {
+                match ch {
+                    '1'..='8' => {
+                        file += (ch as i32) - ('0' as i32);
+                    }
+                    _ => {
+                        if file >= 8 {
+                            return Err(crate::Error::InvalidFen(format!(
+                                "too many files on rank {}",
+                                rank_idx + 1
+                            )));
+                        }
+                        let piece = Piece::from_char(ch).ok_or_else(|| {
+                            crate::Error::InvalidFen(format!("invalid piece: {ch}"))
+                        })?;
+                        let sq = Square::from_file_rank(
+                            File::new(file as u8),
+                            Rank::new(rank_idx as u8),
+                        );
+                        board.put_piece(piece, sq);
+                        file += 1;
                     }
                 }
-                '1'..='8' => {
-                    file += (ch as i32) - ('0' as i32);
-                }
-                _ => {
-                    if file >= 8 {
-                        return Err(crate::Error::InvalidFen("too many files".to_string()));
-                    }
-                    let piece = Piece::from_char(ch)
-                        .ok_or_else(|| crate::Error::InvalidFen(format!("invalid piece: {ch}")))?;
-                    let sq = Square::from_file_rank(File::new(file as u8), Rank::new(rank as u8));
-                    board.put_piece(piece, sq);
-                    file += 1;
-                }
+            }
+            if file != 8 {
+                return Err(crate::Error::InvalidFen(format!(
+                    "rank {} has {file} files, expected 8",
+                    rank_idx + 1
+                )));
             }
         }
 
@@ -765,5 +775,69 @@ mod tests {
         assert!(Board::from_fen("").is_err());
         assert!(Board::from_fen("not a fen").is_err());
         assert!(Board::from_fen("8/8/8/8/8/8/8/8 x KQkq - 0 1").is_err());
+    }
+
+    #[test]
+    fn invalid_fen_wrong_rank_count() {
+        // Only 7 ranks
+        assert!(Board::from_fen("8/8/8/8/8/8/8 w - - 0 1").is_err());
+        // 9 ranks
+        assert!(Board::from_fen("8/8/8/8/8/8/8/8/8 w - - 0 1").is_err());
+    }
+
+    #[test]
+    fn invalid_fen_wrong_file_count() {
+        // Rank with only 7 files
+        assert!(Board::from_fen("8/8/8/8/8/8/8/7 w - - 0 1").is_err());
+        // Rank with 9 files
+        assert!(Board::from_fen("8/8/8/8/8/8/8/PPPPPPPPP w - - 0 1").is_err());
+    }
+
+    #[test]
+    fn invalid_fen_bad_piece_char() {
+        assert!(Board::from_fen("8/8/8/8/8/8/8/X7 w - - 0 1").is_err());
+    }
+
+    #[test]
+    fn invalid_fen_bad_castling() {
+        assert!(Board::from_fen("8/8/8/8/8/8/8/8 w Z - 0 1").is_err());
+    }
+
+    #[test]
+    fn empty_board_defaults() {
+        let board = Board::empty();
+        assert_eq!(board.occupied().popcount(), 0);
+        assert_eq!(board.side_to_move(), Color::White);
+        assert_eq!(board.castling_rights(), CastlingRights::NONE);
+        assert_eq!(board.en_passant_square(), None);
+        assert_eq!(board.halfmove_clock(), 0);
+        assert_eq!(board.fullmove_number(), 1);
+        for sq in Square::ALL {
+            assert!(board.piece_on(sq).is_none());
+        }
+    }
+
+    // Strict en passant: double push only records EP if enemy pawn can capture
+    #[test]
+    fn strict_en_passant_recording() {
+        // Starting position: 1.e4 should NOT record en passant (no black pawn on d4/f4)
+        let mut board = Board::starting_position();
+        let e2e4 = crate::moves::Move::new(Square::E2, Square::E4);
+        board.make_move(e2e4);
+        assert_eq!(
+            board.en_passant_square(),
+            None,
+            "EP should not be set when no enemy pawn can capture"
+        );
+
+        // Position where EP should be recorded (black pawn on d4, white plays e2e4)
+        let mut board =
+            Board::from_fen("rnbqkbnr/ppp1pppp/8/8/3p4/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        board.make_move(e2e4);
+        assert_eq!(
+            board.en_passant_square(),
+            Some(Square::E3),
+            "EP should be set when enemy pawn can capture"
+        );
     }
 }

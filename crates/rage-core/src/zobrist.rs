@@ -100,7 +100,7 @@ pub const fn castling_key(rights: CastlingRights) -> u64 {
 }
 
 /// Compute the Zobrist key for en passant. Pass `None` for no en passant.
-pub fn ep_key(ep_file: Option<File>) -> u64 {
+pub const fn ep_key(ep_file: Option<File>) -> u64 {
     match ep_file {
         None => KEYS.en_passant[0],
         Some(f) => KEYS.en_passant[f.index() + 1],

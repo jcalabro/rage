@@ -169,8 +169,8 @@ struct MagicEntry {
 struct MagicTables {
     bishop_entries: [MagicEntry; 64],
     rook_entries: [MagicEntry; 64],
-    bishop_attacks: Vec<Bitboard>,
-    rook_attacks: Vec<Bitboard>,
+    bishop_attacks: Box<[Bitboard]>,
+    rook_attacks: Box<[Bitboard]>,
 }
 
 /// Compute the relevant blocker mask for a bishop on `sq`.
@@ -281,8 +281,8 @@ fn build_table(sq: u8, mask: u64, magic: u64, attacks_fn: fn(u8, u64) -> u64) ->
 }
 
 fn init_magic_tables() -> MagicTables {
-    let mut bishop_entries: Vec<MagicEntry> = Vec::with_capacity(64);
-    let mut rook_entries: Vec<MagicEntry> = Vec::with_capacity(64);
+    let mut bishop_entries = Vec::with_capacity(64);
+    let mut rook_entries = Vec::with_capacity(64);
     let mut bishop_attacks_vec = Vec::new();
     let mut rook_attacks_vec = Vec::new();
 
@@ -316,17 +316,19 @@ fn init_magic_tables() -> MagicTables {
         });
     }
 
+    // SAFETY: both Vecs have exactly 64 elements, matching the target array size.
+    let Ok(bishop_arr) = bishop_entries.try_into() else {
+        unreachable!()
+    };
+    let Ok(rook_arr) = rook_entries.try_into() else {
+        unreachable!()
+    };
+
     MagicTables {
-        bishop_entries: bishop_entries
-            .try_into()
-            .ok()
-            .unwrap_or_else(|| unreachable!()),
-        rook_entries: rook_entries
-            .try_into()
-            .ok()
-            .unwrap_or_else(|| unreachable!()),
-        bishop_attacks: bishop_attacks_vec,
-        rook_attacks: rook_attacks_vec,
+        bishop_entries: bishop_arr,
+        rook_entries: rook_arr,
+        bishop_attacks: bishop_attacks_vec.into_boxed_slice(),
+        rook_attacks: rook_attacks_vec.into_boxed_slice(),
     }
 }
 

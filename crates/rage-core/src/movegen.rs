@@ -11,21 +11,23 @@ use crate::types::{Color, PieceType, Square};
 
 impl Board {
     /// Generate all legal moves for the side to move.
-    pub fn generate_legal_moves(&self) -> MoveList {
+    pub fn generate_legal_moves(&mut self) -> MoveList {
         let mut moves = MoveList::new();
         self.generate_pseudo_legal_moves(&mut moves);
 
-        // Filter: keep only moves that don't leave own king in check
+        // Filter: keep only moves that don't leave own king in check.
+        // Uses make/unmake to avoid heap-allocating clones.
         let mut legal = MoveList::new();
-        for &m in moves.as_slice() {
-            let mut board = self.clone();
-            board.make_move(m);
+        for i in 0..moves.len() {
+            let m = moves.as_slice()[i];
+            self.make_move(m);
             // After make_move, side_to_move has flipped. Check if the side
             // that just moved left its king in check.
-            let king_sq = board.king_square(!board.side_to_move());
-            if !board.is_attacked(king_sq, board.side_to_move()) {
+            let king_sq = self.king_square(!self.side_to_move());
+            if !self.is_attacked(king_sq, self.side_to_move()) {
                 legal.push(m);
             }
+            self.unmake_move(m);
         }
         legal
     }
@@ -38,12 +40,12 @@ impl Board {
         let their_pieces = self.color_bb(them);
         let occupied = self.occupied();
 
-        self.generate_pawn_moves(moves, us, our_pieces, their_pieces, occupied);
+        self.generate_pawn_moves(moves, us, their_pieces, occupied);
         self.generate_knight_moves(moves, us, our_pieces);
         self.generate_bishop_moves(moves, us, our_pieces, occupied);
         self.generate_rook_moves(moves, us, our_pieces, occupied);
         self.generate_queen_moves(moves, us, our_pieces, occupied);
-        self.generate_king_moves(moves, us, our_pieces, occupied);
+        self.generate_king_moves(moves, us, our_pieces);
         self.generate_castling_moves(moves, us, occupied);
     }
 
@@ -51,32 +53,17 @@ impl Board {
         &self,
         moves: &mut MoveList,
         us: Color,
-        _our_pieces: Bitboard,
         their_pieces: Bitboard,
         occupied: Bitboard,
     ) {
         let pawns = self.pieces(us, PieceType::Pawn);
         let empty = !occupied;
 
-        let (push_dir, promo_rank, _start_rank, double_rank): (
-            fn(Bitboard) -> Bitboard,
-            Bitboard,
-            Bitboard,
-            Bitboard,
-        ) = match us {
-            Color::White => (
-                Bitboard::north,
-                Bitboard::RANK_8,
-                Bitboard::RANK_2,
-                Bitboard::RANK_4,
-            ),
-            Color::Black => (
-                Bitboard::south,
-                Bitboard::RANK_1,
-                Bitboard::RANK_7,
-                Bitboard::RANK_5,
-            ),
-        };
+        let (push_dir, promo_rank, double_rank): (fn(Bitboard) -> Bitboard, Bitboard, Bitboard) =
+            match us {
+                Color::White => (Bitboard::north, Bitboard::RANK_8, Bitboard::RANK_4),
+                Color::Black => (Bitboard::south, Bitboard::RANK_1, Bitboard::RANK_5),
+            };
 
         // Single pawn pushes
         let single_push = push_dir(pawns) & empty;
@@ -200,13 +187,7 @@ impl Board {
         }
     }
 
-    fn generate_king_moves(
-        &self,
-        moves: &mut MoveList,
-        us: Color,
-        our_pieces: Bitboard,
-        _occupied: Bitboard,
-    ) {
+    fn generate_king_moves(&self, moves: &mut MoveList, us: Color, our_pieces: Bitboard) {
         let king_sq = self.king_square(us);
         let targets = attacks::king_attacks(king_sq) & !our_pieces;
         for to in targets {
@@ -277,7 +258,7 @@ impl Board {
 
 /// Perft (performance test): count the number of leaf nodes at a given depth.
 /// This is the fundamental correctness test for move generation.
-pub fn perft(board: &Board, depth: u32) -> u64 {
+pub fn perft(board: &mut Board, depth: u32) -> u64 {
     if depth == 0 {
         return 1;
     }
@@ -289,30 +270,32 @@ pub fn perft(board: &Board, depth: u32) -> u64 {
     }
 
     let mut nodes = 0u64;
-    for &m in moves.as_slice() {
-        let mut board = board.clone();
+    for i in 0..moves.len() {
+        let m = moves.as_slice()[i];
         board.make_move(m);
-        nodes += perft(&board, depth - 1);
+        nodes += perft(board, depth - 1);
+        board.unmake_move(m);
     }
     nodes
 }
 
 /// Divide: like perft but prints the node count for each root move.
 /// Useful for debugging move generation by comparing against a reference.
-pub fn divide(board: &Board, depth: u32) -> u64 {
+pub fn divide(board: &mut Board, depth: u32) -> u64 {
     let moves = board.generate_legal_moves();
     let mut total = 0u64;
 
-    for &m in moves.as_slice() {
-        let mut board = board.clone();
+    for i in 0..moves.len() {
+        let m = moves.as_slice()[i];
         board.make_move(m);
         let nodes = if depth <= 1 {
             1
         } else {
-            perft(&board, depth - 1)
+            perft(board, depth - 1)
         };
         println!("{m}: {nodes}");
         total += nodes;
+        board.unmake_move(m);
     }
     println!("\nTotal: {total}");
     total
@@ -329,7 +312,7 @@ mod tests {
 
     #[test]
     fn starting_position_20_moves() {
-        let board = Board::starting_position();
+        let mut board = Board::starting_position();
         let moves = board.generate_legal_moves();
         assert_eq!(moves.len(), 20);
     }
@@ -338,34 +321,34 @@ mod tests {
 
     #[test]
     fn perft_startpos_depth1() {
-        let board = Board::starting_position();
-        assert_eq!(perft(&board, 1), 20);
+        let mut board = Board::starting_position();
+        assert_eq!(perft(&mut board, 1), 20);
     }
 
     #[test]
     fn perft_startpos_depth2() {
-        let board = Board::starting_position();
-        assert_eq!(perft(&board, 2), 400);
+        let mut board = Board::starting_position();
+        assert_eq!(perft(&mut board, 2), 400);
     }
 
     #[test]
     fn perft_startpos_depth3() {
-        let board = Board::starting_position();
-        assert_eq!(perft(&board, 3), 8_902);
+        let mut board = Board::starting_position();
+        assert_eq!(perft(&mut board, 3), 8_902);
     }
 
     #[test]
     #[ignore]
     fn perft_startpos_depth4() {
-        let board = Board::starting_position();
-        assert_eq!(perft(&board, 4), 197_281);
+        let mut board = Board::starting_position();
+        assert_eq!(perft(&mut board, 4), 197_281);
     }
 
     #[test]
     #[ignore]
     fn perft_startpos_depth5() {
-        let board = Board::starting_position();
-        assert_eq!(perft(&board, 5), 4_865_609);
+        let mut board = Board::starting_position();
+        assert_eq!(perft(&mut board, 5), 4_865_609);
     }
 
     // Kiwipete: great for testing castling, en passant, promotions
@@ -373,27 +356,27 @@ mod tests {
 
     #[test]
     fn perft_kiwipete_depth1() {
-        let board = Board::from_fen(KIWIPETE).unwrap();
-        assert_eq!(perft(&board, 1), 48);
+        let mut board = Board::from_fen(KIWIPETE).unwrap();
+        assert_eq!(perft(&mut board, 1), 48);
     }
 
     #[test]
     fn perft_kiwipete_depth2() {
-        let board = Board::from_fen(KIWIPETE).unwrap();
-        assert_eq!(perft(&board, 2), 2_039);
+        let mut board = Board::from_fen(KIWIPETE).unwrap();
+        assert_eq!(perft(&mut board, 2), 2_039);
     }
 
     #[test]
     fn perft_kiwipete_depth3() {
-        let board = Board::from_fen(KIWIPETE).unwrap();
-        assert_eq!(perft(&board, 3), 97_862);
+        let mut board = Board::from_fen(KIWIPETE).unwrap();
+        assert_eq!(perft(&mut board, 3), 97_862);
     }
 
     #[test]
     #[ignore]
     fn perft_kiwipete_depth4() {
-        let board = Board::from_fen(KIWIPETE).unwrap();
-        assert_eq!(perft(&board, 4), 4_085_603);
+        let mut board = Board::from_fen(KIWIPETE).unwrap();
+        assert_eq!(perft(&mut board, 4), 4_085_603);
     }
 
     // Position 3: endgame-ish with en passant
@@ -401,34 +384,34 @@ mod tests {
 
     #[test]
     fn perft_position3_depth1() {
-        let board = Board::from_fen(POSITION3).unwrap();
-        assert_eq!(perft(&board, 1), 14);
+        let mut board = Board::from_fen(POSITION3).unwrap();
+        assert_eq!(perft(&mut board, 1), 14);
     }
 
     #[test]
     fn perft_position3_depth2() {
-        let board = Board::from_fen(POSITION3).unwrap();
-        assert_eq!(perft(&board, 2), 191);
+        let mut board = Board::from_fen(POSITION3).unwrap();
+        assert_eq!(perft(&mut board, 2), 191);
     }
 
     #[test]
     fn perft_position3_depth3() {
-        let board = Board::from_fen(POSITION3).unwrap();
-        assert_eq!(perft(&board, 3), 2_812);
+        let mut board = Board::from_fen(POSITION3).unwrap();
+        assert_eq!(perft(&mut board, 3), 2_812);
     }
 
     #[test]
     #[ignore]
     fn perft_position3_depth4() {
-        let board = Board::from_fen(POSITION3).unwrap();
-        assert_eq!(perft(&board, 4), 43_238);
+        let mut board = Board::from_fen(POSITION3).unwrap();
+        assert_eq!(perft(&mut board, 4), 43_238);
     }
 
     #[test]
     #[ignore]
     fn perft_position3_depth5() {
-        let board = Board::from_fen(POSITION3).unwrap();
-        assert_eq!(perft(&board, 5), 674_624);
+        let mut board = Board::from_fen(POSITION3).unwrap();
+        assert_eq!(perft(&mut board, 5), 674_624);
     }
 
     // Position 4: many promotions and checks
@@ -436,27 +419,27 @@ mod tests {
 
     #[test]
     fn perft_position4_depth1() {
-        let board = Board::from_fen(POSITION4).unwrap();
-        assert_eq!(perft(&board, 1), 6);
+        let mut board = Board::from_fen(POSITION4).unwrap();
+        assert_eq!(perft(&mut board, 1), 6);
     }
 
     #[test]
     fn perft_position4_depth2() {
-        let board = Board::from_fen(POSITION4).unwrap();
-        assert_eq!(perft(&board, 2), 264);
+        let mut board = Board::from_fen(POSITION4).unwrap();
+        assert_eq!(perft(&mut board, 2), 264);
     }
 
     #[test]
     fn perft_position4_depth3() {
-        let board = Board::from_fen(POSITION4).unwrap();
-        assert_eq!(perft(&board, 3), 9_467);
+        let mut board = Board::from_fen(POSITION4).unwrap();
+        assert_eq!(perft(&mut board, 3), 9_467);
     }
 
     #[test]
     #[ignore]
     fn perft_position4_depth4() {
-        let board = Board::from_fen(POSITION4).unwrap();
-        assert_eq!(perft(&board, 4), 422_333);
+        let mut board = Board::from_fen(POSITION4).unwrap();
+        assert_eq!(perft(&mut board, 4), 422_333);
     }
 
     // Position 5: another complex middlegame
@@ -464,27 +447,27 @@ mod tests {
 
     #[test]
     fn perft_position5_depth1() {
-        let board = Board::from_fen(POSITION5).unwrap();
-        assert_eq!(perft(&board, 1), 44);
+        let mut board = Board::from_fen(POSITION5).unwrap();
+        assert_eq!(perft(&mut board, 1), 44);
     }
 
     #[test]
     fn perft_position5_depth2() {
-        let board = Board::from_fen(POSITION5).unwrap();
-        assert_eq!(perft(&board, 2), 1_486);
+        let mut board = Board::from_fen(POSITION5).unwrap();
+        assert_eq!(perft(&mut board, 2), 1_486);
     }
 
     #[test]
     fn perft_position5_depth3() {
-        let board = Board::from_fen(POSITION5).unwrap();
-        assert_eq!(perft(&board, 3), 62_379);
+        let mut board = Board::from_fen(POSITION5).unwrap();
+        assert_eq!(perft(&mut board, 3), 62_379);
     }
 
     #[test]
     #[ignore]
     fn perft_position5_depth4() {
-        let board = Board::from_fen(POSITION5).unwrap();
-        assert_eq!(perft(&board, 4), 2_103_487);
+        let mut board = Board::from_fen(POSITION5).unwrap();
+        assert_eq!(perft(&mut board, 4), 2_103_487);
     }
 
     // Position 6: alternative starting analysis
@@ -493,39 +476,38 @@ mod tests {
 
     #[test]
     fn perft_position6_depth1() {
-        let board = Board::from_fen(POSITION6).unwrap();
-        assert_eq!(perft(&board, 1), 46);
+        let mut board = Board::from_fen(POSITION6).unwrap();
+        assert_eq!(perft(&mut board, 1), 46);
     }
 
     #[test]
     fn perft_position6_depth2() {
-        let board = Board::from_fen(POSITION6).unwrap();
-        assert_eq!(perft(&board, 2), 2_079);
+        let mut board = Board::from_fen(POSITION6).unwrap();
+        assert_eq!(perft(&mut board, 2), 2_079);
     }
 
     #[test]
     fn perft_position6_depth3() {
-        let board = Board::from_fen(POSITION6).unwrap();
-        assert_eq!(perft(&board, 3), 89_890);
+        let mut board = Board::from_fen(POSITION6).unwrap();
+        assert_eq!(perft(&mut board, 3), 89_890);
     }
 
     #[test]
     #[ignore]
     fn perft_position6_depth4() {
-        let board = Board::from_fen(POSITION6).unwrap();
-        assert_eq!(perft(&board, 4), 3_894_594);
+        let mut board = Board::from_fen(POSITION6).unwrap();
+        assert_eq!(perft(&mut board, 4), 3_894_594);
     }
 
     // Verify make/unmake preserves board state
     #[test]
     fn make_unmake_preserves_state() {
-        let board = Board::starting_position();
+        let mut board = Board::starting_position();
         let original_fen = board.to_fen();
         let original_hash = board.zobrist_hash();
         let moves = board.generate_legal_moves();
 
         for &m in moves.as_slice() {
-            let mut board = board.clone();
             board.make_move(m);
             board.unmake_move(m);
             assert_eq!(
@@ -544,11 +526,10 @@ mod tests {
     // Verify Zobrist incremental update matches full recomputation
     #[test]
     fn zobrist_incremental_matches_full() {
-        let board = Board::starting_position();
+        let mut board = Board::starting_position();
         let moves = board.generate_legal_moves();
 
         for &m in moves.as_slice() {
-            let mut board = board.clone();
             board.make_move(m);
             let incremental = board.zobrist_hash();
             let full = board.compute_zobrist();
@@ -556,30 +537,186 @@ mod tests {
                 incremental, full,
                 "Zobrist mismatch after {m}: incremental=0x{incremental:016x}, full=0x{full:016x}"
             );
+            board.unmake_move(m);
         }
+    }
+
+    // Checkmate: no legal moves, king is in check
+    #[test]
+    fn checkmate_has_no_legal_moves() {
+        // Fool's mate final position
+        let mut board =
+            Board::from_fen("rnb1kbnr/pppp1ppp/4p3/8/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3")
+                .unwrap();
+        let moves = board.generate_legal_moves();
+        assert!(moves.is_empty(), "checkmate should have 0 legal moves");
+        assert!(board.in_check());
+    }
+
+    // Stalemate: no legal moves, king is NOT in check
+    #[test]
+    fn stalemate_has_no_legal_moves() {
+        // Black king trapped but not in check
+        let mut board = Board::from_fen("5k2/5P2/5K2/8/8/8/8/8 b - - 0 1").unwrap();
+        let moves = board.generate_legal_moves();
+        assert!(moves.is_empty(), "stalemate should have 0 legal moves");
+        assert!(!board.in_check());
+    }
+
+    // Make/unmake preserves state for en passant captures
+    #[test]
+    fn make_unmake_en_passant() {
+        // After 1.e4 d5 2.e5 f5, en passant e5xf6 is available
+        let mut board =
+            Board::from_fen("rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3")
+                .unwrap();
+        let original_fen = board.to_fen();
+        let original_hash = board.zobrist_hash();
+        let moves = board.generate_legal_moves();
+
+        // Find the en passant move
+        let ep_move = moves.iter().find(|m| m.is_en_passant());
+        assert!(ep_move.is_some(), "should have an EP move available");
+
+        for &m in moves.as_slice() {
+            board.make_move(m);
+            board.unmake_move(m);
+            assert_eq!(
+                board.to_fen(),
+                original_fen,
+                "FEN mismatch after make/unmake {m}"
+            );
+            assert_eq!(
+                board.zobrist_hash(),
+                original_hash,
+                "Zobrist mismatch after make/unmake {m}"
+            );
+        }
+    }
+
+    // Make/unmake preserves state for castling moves
+    #[test]
+    fn make_unmake_castling() {
+        // Position where both sides can castle
+        let mut board =
+            Board::from_fen("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
+        let original_fen = board.to_fen();
+        let original_hash = board.zobrist_hash();
+        let moves = board.generate_legal_moves();
+
+        // Verify castling moves exist
+        let castle_moves: Vec<_> = moves.iter().filter(|m| m.is_castling()).collect();
+        assert_eq!(
+            castle_moves.len(),
+            2,
+            "should have both kingside and queenside castling"
+        );
+
+        for &m in moves.as_slice() {
+            board.make_move(m);
+            board.unmake_move(m);
+            assert_eq!(
+                board.to_fen(),
+                original_fen,
+                "FEN mismatch after make/unmake {m}"
+            );
+            assert_eq!(
+                board.zobrist_hash(),
+                original_hash,
+                "Zobrist mismatch after make/unmake {m}"
+            );
+        }
+    }
+
+    // Make/unmake preserves state for promotion moves
+    #[test]
+    fn make_unmake_promotion() {
+        // White pawn on 7th rank, can promote
+        let mut board = Board::from_fen("4k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let original_fen = board.to_fen();
+        let original_hash = board.zobrist_hash();
+        let moves = board.generate_legal_moves();
+
+        // Should have 4 promotion moves (N, B, R, Q) plus king moves
+        let promo_moves: Vec<_> = moves.iter().filter(|m| m.is_promotion()).collect();
+        assert_eq!(promo_moves.len(), 4, "should have 4 promotion moves");
+
+        for &m in moves.as_slice() {
+            board.make_move(m);
+            board.unmake_move(m);
+            assert_eq!(
+                board.to_fen(),
+                original_fen,
+                "FEN mismatch after make/unmake {m}"
+            );
+            assert_eq!(
+                board.zobrist_hash(),
+                original_hash,
+                "Zobrist mismatch after make/unmake {m}"
+            );
+        }
+    }
+
+    // Zobrist incremental matches full recomputation for special moves
+    #[test]
+    fn zobrist_incremental_special_moves() {
+        let positions = [
+            // EP available
+            "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3",
+            // Castling available
+            "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1",
+            // Promotion available
+            "4k3/P7/8/8/8/8/8/4K3 w - - 0 1",
+            // Promotion with capture
+            "1n2k3/P7/8/8/8/8/8/4K3 w - - 0 1",
+        ];
+
+        for fen in positions {
+            let mut board = Board::from_fen(fen).unwrap();
+            let moves = board.generate_legal_moves();
+            for &m in moves.as_slice() {
+                board.make_move(m);
+                let incremental = board.zobrist_hash();
+                let full = board.compute_zobrist();
+                assert_eq!(
+                    incremental, full,
+                    "Zobrist mismatch in '{fen}' after {m}: incremental=0x{incremental:016x}, full=0x{full:016x}"
+                );
+                board.unmake_move(m);
+            }
+        }
+    }
+
+    // Verify divide returns same total as perft
+    #[test]
+    fn divide_matches_perft() {
+        let mut board = Board::starting_position();
+        let perft_result = perft(&mut board, 2);
+        // divide prints to stdout, but returns the same total
+        let divide_result = divide(&mut board, 2);
+        assert_eq!(perft_result, divide_result);
     }
 
     // Same test but at depth 2 (covers all first-move responses)
     #[test]
     #[ignore]
     fn zobrist_incremental_depth2() {
-        let board = Board::starting_position();
+        let mut board = Board::starting_position();
         let moves = board.generate_legal_moves();
 
         for &m1 in moves.as_slice() {
-            let mut board1 = board.clone();
-            board1.make_move(m1);
-
-            let moves2 = board1.generate_legal_moves();
+            board.make_move(m1);
+            let moves2 = board.generate_legal_moves();
             for &m2 in moves2.as_slice() {
-                let mut board2 = board1.clone();
-                board2.make_move(m2);
+                board.make_move(m2);
                 assert_eq!(
-                    board2.zobrist_hash(),
-                    board2.compute_zobrist(),
+                    board.zobrist_hash(),
+                    board.compute_zobrist(),
                     "Zobrist mismatch after {m1} {m2}"
                 );
+                board.unmake_move(m2);
             }
+            board.unmake_move(m1);
         }
     }
 }
