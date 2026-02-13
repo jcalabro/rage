@@ -2,17 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    branches: ['*']
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  fmt:
-    name: Format
+  ci:
+    name: CI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -20,71 +18,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.93.1"
-          components: rustfmt
-
-      - run: cargo fmt --all -- --check
-
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.93.1"
-          components: clippy
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
       - uses: extractions/setup-just@v3
 
+      - run: just fmt --check
       - run: just lint
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.93.1"
-
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: extractions/setup-just@v3
-
-      - run: just test
-
-  test-long:
-    name: Test (long)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.93.1"
-
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: extractions/setup-just@v3
-
       - run: just test-long
-
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.93.1"
-
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: extractions/setup-just@v3
-
-      - run: just build

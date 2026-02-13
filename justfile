@@ -12,8 +12,8 @@ lint:
     cargo clippy --all -- -D warnings
 
 # Formats all code
-fmt:
-    cargo fmt
+fmt *ARGS:
+    cargo fmt -- {{ARGS}}
 
 # Runs fast tests (skips #[ignore] tests)
 test *ARGS:
