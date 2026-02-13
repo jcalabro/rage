@@ -21,6 +21,9 @@ target
 #.idea/
 
 
+# Proptest regression files
+**/proptest-regressions/
+
 # Added by cargo
 
 /target

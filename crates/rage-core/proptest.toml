@@ -1,0 +1,2 @@
+cases = 256
+max_shrink_iters = 1000

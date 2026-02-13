@@ -19,9 +19,9 @@ fmt *ARGS:
 test *ARGS:
     cargo test {{ARGS}}
 
-# Runs all tests including slow perft suites
+# Runs all tests including slow ones
 test-long *ARGS:
-    cargo test {{ARGS}} -- --include-ignored
+    PROPTEST_CASES=2048 cargo test {{ARGS}} -- --include-ignored
 
 # Runs all tests with verbose logging
 testv *ARGS:
