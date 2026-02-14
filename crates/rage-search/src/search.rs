@@ -133,6 +133,16 @@ impl Searcher {
             }
         }
 
+        // If we got stopped before completing any iteration, fall back to
+        // the first legal move so we never return a null move.
+        if best_move.is_null() {
+            let moves = board.generate_legal_moves();
+            if !moves.is_empty() {
+                best_move = moves[0];
+                best_pv = vec![best_move];
+            }
+        }
+
         SearchResult {
             best_move,
             score: best_score,
@@ -374,6 +384,8 @@ fn is_draw(board: &Board) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use super::*;
 
     fn search_position(fen: &str, depth: u32) -> SearchResult {
@@ -468,6 +480,152 @@ mod tests {
             result.score > 800,
             "K+Q vs K should be heavily winning, got {}",
             result.score
+        );
+    }
+
+    #[test]
+    fn checkmate_position_returns_null() {
+        // White is in checkmate (Fool's Mate). No legal moves.
+        let result = search_position(
+            "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3",
+            3,
+        );
+        assert!(result.best_move.is_null(), "checkmate: no move to make");
+    }
+
+    #[test]
+    fn stalemate_position_returns_null() {
+        // Black to move, stalemated (Ka8, white Ka6+Qb6)
+        let result = search_position("k7/8/KQ6/8/8/8/8/8 b - - 0 1", 3);
+        assert!(result.best_move.is_null(), "stalemate: no move to make");
+    }
+
+    #[test]
+    fn early_stop_returns_valid_move() {
+        // Simulate immediate stop: set stop flag before searching
+        let mut board = Board::from_fen(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        )
+        .unwrap();
+        let mut searcher = Searcher::new(16);
+        let limits = SearchLimits {
+            depth: Some(10),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(true)); // Pre-set stop
+        let result = searcher.search(&mut board, &limits, stop, None);
+        // Should fall back to first legal move, not return null
+        assert!(
+            !result.best_move.is_null(),
+            "early stop should still return a valid move"
+        );
+    }
+
+    #[test]
+    fn ruy_lopez_reasonable() {
+        // After 1.e4 e5 2.Nf3 Nc6 3.Bb5 (Ruy Lopez)
+        let result = search_position(
+            "r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+            5,
+        );
+        assert!(!result.best_move.is_null(), "must find a move");
+        // Score should be roughly equal
+        assert!(
+            result.score.abs() < 150,
+            "Ruy Lopez should be roughly equal, got {}",
+            result.score
+        );
+    }
+
+    #[test]
+    fn mate_in_two() {
+        // White to play: 1.Qg7# isn't possible, but 1.Qf8+ Rxf8 2.Rd8# is mate in 2
+        // Position: white Qf2, Rd1; black Ka8, Ra7, pawns a6 b7
+        let result = search_position(
+            "k7/rp6/p7/8/8/8/5Q2/3R1K2 w - - 0 1",
+            5,
+        );
+        // Should find a mating sequence
+        assert!(
+            result.score > MATE_SCORE - 20,
+            "should find forced mate, got {}",
+            result.score
+        );
+    }
+
+    #[test]
+    fn captures_hanging_piece() {
+        // Black queen hanging on d5, white pawn on e4 can capture
+        let result = search_position(
+            "rnb1kbnr/pppppppp/8/3q4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1",
+            3,
+        );
+        assert_eq!(
+            result.best_move.to_string(),
+            "e4d5",
+            "should capture hanging queen"
+        );
+    }
+
+    #[test]
+    fn info_callback_called() {
+        let mut board = Board::from_fen(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        )
+        .unwrap();
+        let mut searcher = Searcher::new(16);
+        let limits = SearchLimits {
+            depth: Some(3),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let callback_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter = Arc::clone(&callback_count);
+        let cb: InfoCallback = Box::new(move |_info| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+        searcher.search(&mut board, &limits, stop, Some(cb));
+        // Should have been called once per completed depth (3 depths)
+        assert_eq!(
+            callback_count.load(Ordering::Relaxed),
+            3,
+            "info callback should fire for each completed depth"
+        );
+    }
+
+    #[test]
+    fn pv_extraction_works() {
+        let result = search_position(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            3,
+        );
+        assert!(
+            !result.pv.is_empty(),
+            "PV should not be empty at depth 3"
+        );
+        assert!(
+            result.pv.len() >= 2,
+            "PV should have at least 2 moves at depth 3, got {}",
+            result.pv.len()
+        );
+    }
+
+    #[test]
+    fn search_respects_depth_limit() {
+        // Depth 1 should search far fewer nodes than depth 5
+        let result1 = search_position(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            1,
+        );
+        let result5 = search_position(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            5,
+        );
+        assert!(
+            result5.nodes > result1.nodes * 10,
+            "depth 5 ({}) should search much more than depth 1 ({})",
+            result5.nodes,
+            result1.nodes
         );
     }
 }

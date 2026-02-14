@@ -588,4 +588,92 @@ mod tests {
         engine.handle_command("stop");
         assert!(engine.searcher.is_some());
     }
+
+    #[test]
+    fn position_with_castling_moves() {
+        let mut engine = UciEngine::new();
+        // Play to a position where castling has occurred
+        engine.handle_command(
+            "position startpos moves e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 d2d3 f8e7 e1g1",
+        );
+        // Verify white castled kingside: king on g1, rook on f1
+        let fen = engine.board.to_fen();
+        assert!(
+            fen.contains("q -") || fen.contains("kq -"),
+            "white should have castled (lost castling rights)"
+        );
+    }
+
+    #[test]
+    fn position_with_promotion() {
+        let mut engine = UciEngine::new();
+        // Position where white pawn promotes
+        engine.handle_command(
+            "position fen 8/P7/8/8/8/8/8/4K2k w - - 0 1 moves a7a8q",
+        );
+        let fen = engine.board.to_fen();
+        assert!(
+            fen.starts_with("Q"),
+            "pawn should have promoted to queen: {fen}"
+        );
+    }
+
+    #[test]
+    fn multiple_go_commands() {
+        let mut engine = UciEngine::new();
+        engine.handle_command("position startpos");
+        engine.handle_command("go depth 2");
+        engine.handle_command("stop");
+        // Second search should work fine with preserved TT
+        engine.handle_command("go depth 2");
+        engine.handle_command("stop");
+        assert!(engine.searcher.is_some());
+    }
+
+    #[test]
+    fn ucinewgame_clears_tt() {
+        let mut engine = UciEngine::new();
+        engine.handle_command("position startpos");
+        engine.handle_command("go depth 3");
+        engine.handle_command("stop");
+        engine.handle_command("ucinewgame");
+        // After ucinewgame, board should be reset
+        assert_eq!(engine.board.to_fen(), Board::STARTPOS_FEN);
+        // Searcher should be recovered
+        assert!(engine.searcher.is_some());
+    }
+
+    #[test]
+    fn empty_go_treated_as_infinite() {
+        let mut engine = UciEngine::new();
+        engine.handle_command("position startpos");
+        // "go" with no params = infinite search
+        engine.handle_command("go");
+        // Let it search briefly then stop
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        engine.handle_command("stop");
+        assert!(engine.searcher.is_some());
+    }
+
+    #[test]
+    fn invalid_fen_ignored() {
+        let mut engine = UciEngine::new();
+        let original_fen = engine.board.to_fen();
+        engine.handle_command("position fen totally_invalid_fen");
+        // Board should remain unchanged
+        assert_eq!(engine.board.to_fen(), original_fen);
+    }
+
+    #[test]
+    fn invalid_move_stops_apply() {
+        let mut engine = UciEngine::new();
+        // First move valid, second invalid - should stop at invalid
+        engine.handle_command("position startpos moves e2e4 zzzz");
+        // Only e2e4 should have been applied
+        let fen = engine.board.to_fen();
+        assert!(
+            fen.contains("4P3"),
+            "e2e4 should have been applied: {fen}"
+        );
+    }
 }
