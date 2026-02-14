@@ -16,7 +16,11 @@ dead_code = "allow"
 rage-core = { path = "../rage-core" }
 rage-nnue = { path = "../rage-nnue" }
 rage-search = { path = "../rage-search" }
-burn = "0.16"
-burn-ndarray = "0.16"
+burn = { version = "0.20", features = ["ndarray", "autodiff"] }
 clap = { version = "4", features = ["derive"] }
 rand = "0.8"
+rayon = "1"
+
+[features]
+default = []
+cuda = ["burn/cuda"]

@@ -2,6 +2,7 @@
 
 mod data;
 mod datagen;
+mod loader;
 mod model;
 mod quantize;
 mod train;
@@ -34,6 +35,9 @@ enum Command {
         /// Number of random opening moves.
         #[arg(long, default_value_t = 8)]
         random_plies: u32,
+        /// Number of threads (0 = all available cores).
+        #[arg(short, long, default_value_t = 0)]
+        threads: usize,
     },
     /// Train the NNUE network.
     Train {
@@ -55,7 +59,7 @@ enum Command {
     },
     /// Quantize a trained f32 model to .nnue format.
     Quantize {
-        /// Input model directory.
+        /// Input model checkpoint path (without extension).
         #[arg(short, long)]
         model: PathBuf,
         /// Output .nnue file path.
@@ -73,11 +77,13 @@ fn main() {
             games,
             depth,
             random_plies,
+            threads,
         } => {
             let config = datagen::DatagenConfig {
                 num_games: games,
                 depth,
                 random_plies,
+                threads,
                 ..Default::default()
             };
             match datagen::generate_data(&config, &output) {
@@ -86,22 +92,43 @@ fn main() {
             }
         }
         Command::Train {
-            data: _data,
-            output: _output,
-            epochs: _epochs,
-            batch_size: _batch_size,
-            learning_rate: _lr,
+            data,
+            output,
+            epochs,
+            batch_size,
+            learning_rate,
         } => {
-            // TODO: Implement training loop with Burn
-            eprintln!("Training is not yet implemented. Use datagen and quantize.");
+            let config = train::TrainConfig {
+                epochs,
+                batch_size,
+                learning_rate,
+                ..Default::default()
+            };
+
+            #[cfg(feature = "cuda")]
+            {
+                type MyBackend = burn::backend::Autodiff<burn::backend::Cuda>;
+                let device = burn::backend::cuda::CudaDevice::new(0);
+                if let Err(e) = train::train::<MyBackend>(&config, &data, &output, &device) {
+                    eprintln!("Training error: {e}");
+                }
+            }
+
+            #[cfg(not(feature = "cuda"))]
+            {
+                type MyBackend = burn::backend::Autodiff<burn::backend::NdArray>;
+                let device = burn::backend::ndarray::NdArrayDevice::Cpu;
+                if let Err(e) = train::train::<MyBackend>(&config, &data, &output, &device) {
+                    eprintln!("Training error: {e}");
+                }
+            }
         }
-        Command::Quantize {
-            model: _model,
-            output: _output,
-        } => {
-            // TODO: Load Burn model and quantize
-            eprintln!("Quantization from Burn model is not yet implemented.");
-            eprintln!("Use the quantize module API directly for programmatic quantization.");
+        Command::Quantize { model, output } => {
+            type B = burn::backend::NdArray;
+            let device = burn::backend::ndarray::NdArrayDevice::Cpu;
+            if let Err(e) = quantize::load_and_quantize::<B>(&model, &output, &device) {
+                eprintln!("Quantization error: {e}");
+            }
         }
     }
 }

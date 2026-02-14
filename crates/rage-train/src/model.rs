@@ -19,15 +19,15 @@ const MAX_ACTIVE: usize = 32;
 #[derive(Module, Debug)]
 pub struct HalfKAv2Model<B: Backend> {
     /// Feature transformer embedding table: [TOTAL_INPUT_FEATURES, HIDDEN_SIZE].
-    ft: nn::Embedding<B>,
+    pub ft: nn::Embedding<B>,
     /// Feature transformer bias: [HIDDEN_SIZE] via a linear layer.
-    ft_bias: nn::Linear<B>,
+    pub ft_bias: nn::Linear<B>,
     /// Output layer: [CRELU_OUTPUT_SIZE] → [1].
-    output: nn::Linear<B>,
+    pub output: nn::Linear<B>,
 }
 
 /// Configuration for the HalfKAv2 model.
-#[derive(burn::config::Config)]
+#[derive(burn::config::Config, Debug)]
 pub struct HalfKAv2Config {
     #[config(default = 7680)]
     pub total_features: usize,

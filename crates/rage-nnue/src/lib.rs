@@ -1,6 +1,6 @@
 mod accumulator;
 pub mod arch;
-mod features;
+pub mod features;
 mod network;
 pub(crate) mod simd;
 mod weights;

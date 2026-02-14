@@ -2,13 +2,14 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rage_core::{Board, Color};
 use rage_search::search::Searcher;
 use rage_search::time::SearchLimits;
 use rage_search::tt::TranspositionTable;
 use rand::Rng;
+use rayon::prelude::*;
 
 use crate::data::{TrainingEntry, WdlResult};
 
@@ -24,6 +25,8 @@ pub struct DatagenConfig {
     pub adjudication_score: i32,
     /// Maximum game length in plies.
     pub max_plies: u32,
+    /// Number of threads for parallel game generation.
+    pub threads: usize,
 }
 
 impl Default for DatagenConfig {
@@ -34,6 +37,7 @@ impl Default for DatagenConfig {
             random_plies: 8,
             adjudication_score: 3000,
             max_plies: 400,
+            threads: 0, // 0 = use all available cores
         }
     }
 }
@@ -47,30 +51,62 @@ enum GameResult {
 
 /// Generate training data via self-play and write to binary file.
 pub fn generate_data(config: &DatagenConfig, output_path: &Path) -> std::io::Result<usize> {
+    let threads = if config.threads == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        config.threads
+    };
+
+    eprintln!(
+        "Generating {} games at depth {} with {} threads...",
+        config.num_games, config.depth, threads
+    );
+
+    // Configure rayon thread pool
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(std::io::Error::other)?;
+
+    let games_completed = AtomicUsize::new(0);
+
+    let all_positions: Vec<Vec<TrainingEntry>> = pool.install(|| {
+        (0..config.num_games)
+            .into_par_iter()
+            .map(|_| {
+                let mut rng = rand::thread_rng();
+                let positions = play_game(config, &mut rng);
+
+                let done = games_completed.fetch_add(1, Ordering::Relaxed) + 1;
+                if done.is_multiple_of(100) || done == config.num_games {
+                    eprintln!("  Games: {}/{}", done, config.num_games);
+                }
+
+                positions
+            })
+            .collect()
+    });
+
+    // Write all entries sequentially
     let file = File::create(output_path)?;
     let mut writer = BufWriter::new(file);
     let mut total_positions = 0usize;
-    let mut rng = rand::thread_rng();
 
-    for game_idx in 0..config.num_games {
-        if game_idx % 100 == 0 {
-            eprintln!(
-                "Game {}/{} ({} positions so far)",
-                game_idx, config.num_games, total_positions
-            );
-        }
-
-        let positions = play_game(config, &mut rng);
-        for entry in &positions {
+    for positions in &all_positions {
+        for entry in positions {
             writer.write_all(&entry.to_bytes())?;
         }
         total_positions += positions.len();
     }
-
     writer.flush()?;
+
     eprintln!(
-        "Generated {} positions from {} games",
-        total_positions, config.num_games
+        "Generated {} positions from {} games -> {}",
+        total_positions,
+        config.num_games,
+        output_path.display()
     );
     Ok(total_positions)
 }
