@@ -1008,6 +1008,67 @@ mod tests {
         assert!(!board.is_repetition());
     }
 
+    // Halfmove clock: resets on pawn move, resets on capture, increments otherwise.
+    #[test]
+    fn halfmove_clock_behavior() {
+        let mut board = Board::starting_position();
+        assert_eq!(board.halfmove_clock(), 0);
+
+        // Knight move increments clock
+        let nf3 = crate::moves::Move::new(Square::G1, Square::F3);
+        board.make_move(nf3);
+        assert_eq!(board.halfmove_clock(), 1);
+
+        // Another knight move increments again
+        let nc6 = crate::moves::Move::new(Square::B8, Square::C6);
+        board.make_move(nc6);
+        assert_eq!(board.halfmove_clock(), 2);
+
+        // Pawn move resets clock
+        let e4 = crate::moves::Move::new(Square::E2, Square::E4);
+        board.make_move(e4);
+        assert_eq!(board.halfmove_clock(), 0);
+    }
+
+    // Halfmove clock resets on captures too.
+    #[test]
+    fn halfmove_clock_resets_on_capture() {
+        // Position with a capture available and some moves already made (clock > 0).
+        let mut board =
+            Board::from_fen("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 4 3")
+                .unwrap();
+        assert_eq!(board.halfmove_clock(), 4);
+        // exd5 is a capture
+        let exd5 = crate::moves::Move::new(Square::E4, Square::D5);
+        board.make_move(exd5);
+        assert_eq!(board.halfmove_clock(), 0);
+    }
+
+    // No repetition when castling rights differ: moving the king and back
+    // loses castling rights, so the position hash differs from the original.
+    #[test]
+    fn no_repetition_different_castling_rights() {
+        let mut board =
+            Board::from_fen("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
+        let original_hash = board.zobrist_hash();
+
+        // Ke2 (loses white castling rights), then random black move, then Ke1
+        let ke2 = crate::moves::Move::new(Square::E1, Square::E2);
+        let a6 = crate::moves::Move::new(Square::A7, Square::A6);
+        let ke1 = crate::moves::Move::new(Square::E2, Square::E1);
+        let a5 = crate::moves::Move::new(Square::A6, Square::A5);
+
+        board.make_move(ke2);
+        board.make_move(a6);
+        board.make_move(ke1);
+        board.make_move(a5);
+
+        // Pieces are in different places (a5 pawn) AND castling rights differ.
+        // Hash must differ from original.
+        assert_ne!(board.zobrist_hash(), original_hash);
+        assert!(!board.is_repetition());
+    }
+
     // Strict en passant: double push only records EP if enemy pawn can capture
     #[test]
     fn strict_en_passant_recording() {
