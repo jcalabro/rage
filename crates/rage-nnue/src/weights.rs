@@ -69,6 +69,12 @@ impl NnueWeights {
         }
     }
 
+    /// Load weights from a file on disk.
+    pub fn from_file(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let data = std::fs::read(path)?;
+        Ok(Self::from_bytes(&data)?)
+    }
+
     /// Serialize weights to bytes in the rage NNUE binary format.
     pub fn to_bytes(&self) -> Vec<u8> {
         let ft_size = TOTAL_INPUT_FEATURES * HIDDEN_SIZE * 2; // i16
@@ -317,5 +323,46 @@ mod tests {
             + CRELU_OUTPUT_SIZE                        // output_weights (i8)
             + 4; // output_bias (i32)
         assert_eq!(bytes.len(), expected, "file size mismatch");
+    }
+
+    #[test]
+    fn from_file_roundtrip() {
+        let original = NnueWeights::random(42);
+        let bytes = original.to_bytes();
+
+        let dir = std::env::temp_dir().join("rage_test_weights");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("roundtrip.nnue");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let loaded = NnueWeights::from_file(&path).unwrap();
+
+        assert_eq!(original.ft_biases.as_ref(), loaded.ft_biases.as_ref());
+        assert_eq!(
+            original.output_weights.as_ref(),
+            loaded.output_weights.as_ref()
+        );
+        assert_eq!(original.output_bias, loaded.output_bias);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn from_file_nonexistent_path() {
+        let result = NnueWeights::from_file(std::path::Path::new("/tmp/does_not_exist_12345.nnue"));
+        assert!(result.is_err(), "nonexistent file should return error");
+    }
+
+    #[test]
+    fn from_file_corrupt_data() {
+        let dir = std::env::temp_dir().join("rage_test_weights");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("corrupt.nnue");
+        std::fs::write(&path, b"not a valid nnue file").unwrap();
+
+        let result = NnueWeights::from_file(&path);
+        assert!(result.is_err(), "corrupt file should return error");
+
+        std::fs::remove_file(&path).unwrap();
     }
 }

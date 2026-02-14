@@ -1,10 +1,12 @@
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Instant;
 
 use rage_core::Board;
+use rage_nnue::{NnueNetwork, NnueWeights};
 use rage_search::search::InfoCallback;
 use rage_search::threads::ThreadPool;
 use rage_search::time::SearchLimits;
@@ -19,7 +21,9 @@ const DEFAULT_HASH_MB: usize = 16;
 const DEFAULT_THREADS: usize = 1;
 
 /// Run the UCI protocol loop. Blocks until `quit` is received.
-pub fn run() {
+///
+/// If `network` is provided, it is set on all search threads at startup.
+pub fn run(network: Option<Arc<NnueNetwork>>) {
     let (tx, rx) = mpsc::channel::<String>();
 
     // Spawn stdin reader thread
@@ -42,7 +46,7 @@ pub fn run() {
         env!("CARGO_PKG_VERSION")
     );
 
-    let mut engine = UciEngine::new();
+    let mut engine = UciEngine::new(network);
 
     while let Ok(line) = rx.recv() {
         let line = line.trim();
@@ -77,15 +81,44 @@ struct UciEngine {
 }
 
 impl UciEngine {
-    fn new() -> Self {
+    fn new(network: Option<Arc<NnueNetwork>>) -> Self {
+        let mut pool = ThreadPool::new(DEFAULT_THREADS, DEFAULT_HASH_MB);
+        if let Some(net) = network {
+            pool.set_network(Some(net));
+        }
         Self {
             board: Board::starting_position(),
-            pool: Some(ThreadPool::new(DEFAULT_THREADS, DEFAULT_HASH_MB)),
+            pool: Some(pool),
             stop: Arc::new(AtomicBool::new(false)),
             search_handle: None,
             ponder_flag: None,
             ponder_offset: None,
             ponder_start: None,
+        }
+    }
+
+    /// Try to load an NNUE network from the given path and set it on the pool.
+    /// Prints an error to stderr on failure (graceful fallback to PST eval).
+    fn load_network(&mut self, path: &str) {
+        if path.is_empty() || path == "<empty>" {
+            // Clear the network, fall back to PST eval
+            if let Some(ref mut pool) = self.pool {
+                pool.set_network(None);
+            }
+            return;
+        }
+
+        match NnueWeights::from_file(Path::new(path)) {
+            Ok(weights) => {
+                let network = Arc::new(NnueNetwork::new(weights));
+                if let Some(ref mut pool) = self.pool {
+                    pool.set_network(Some(network));
+                }
+                eprintln!("info string loaded NNUE network from {path}");
+            }
+            Err(e) => {
+                eprintln!("info string failed to load NNUE network: {e}");
+            }
         }
     }
 
@@ -142,6 +175,7 @@ impl UciEngine {
         println!("option name Hash type spin default {DEFAULT_HASH_MB} min 1 max 1024");
         println!("option name Threads type spin default {DEFAULT_THREADS} min 1 max 256");
         println!("option name Ponder type check default true");
+        println!("option name EvalFile type string default <empty>");
         println!("uciok");
     }
 
@@ -363,6 +397,9 @@ impl UciEngine {
                     }
                 }
             }
+            "evalfile" => {
+                self.load_network(&value);
+            }
             _ => {}
         }
     }
@@ -483,12 +520,22 @@ impl UciEngine {
         println!();
     }
 
-    fn cmd_eval(&self) {
-        let score = rage_search::eval::evaluate_pst(&self.board);
+    fn cmd_eval(&mut self) {
+        let pst_score = rage_search::eval::evaluate_pst(&self.board);
         println!(
-            "Static eval: {score} cp (from {} perspective)",
+            "PST eval: {pst_score} cp (from {} perspective)",
             self.board.side_to_move()
         );
+
+        // Show NNUE eval if a network is loaded
+        if let Some(ref mut pool) = self.pool
+            && let Some(nnue_score) = pool.evaluate_nnue(&self.board)
+        {
+            println!(
+                "NNUE eval: {nnue_score} cp (from {} perspective)",
+                self.board.side_to_move()
+            );
+        }
     }
 
     fn cmd_bench<'a>(&mut self, tokens: &mut impl Iterator<Item = &'a str>) {
@@ -497,7 +544,8 @@ impl UciEngine {
             .next()
             .and_then(|s| s.parse().ok())
             .unwrap_or(rage_search::bench::DEFAULT_BENCH_DEPTH);
-        rage_search::bench::run_bench(depth);
+        let network = self.pool.as_ref().and_then(|p| p.network()).map(Arc::clone);
+        rage_search::bench::run_bench(depth, network);
     }
 
     fn cmd_perft<'a>(&mut self, tokens: &mut impl Iterator<Item = &'a str>) {
@@ -558,6 +606,11 @@ impl UciEngine {
         println!("  setoption      Set engine option (name <n> value <v>)");
         println!("  quit           Exit the engine");
         println!();
+        println!("Options:");
+        println!("  Hash <MB>      Transposition table size (1-1024, default {DEFAULT_HASH_MB})");
+        println!("  Threads <N>    Number of search threads (1-256, default {DEFAULT_THREADS})");
+        println!("  EvalFile <path> Load NNUE network from file (empty to clear)");
+        println!();
         println!("Debug commands:");
         println!("  bench [depth]  Run search benchmark (default depth 13)");
         println!("  d / display    Show the current board");
@@ -603,14 +656,14 @@ mod tests {
 
     #[test]
     fn parse_position_startpos() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("position startpos");
         assert_eq!(engine.board.to_fen(), Board::STARTPOS_FEN);
     }
 
     #[test]
     fn parse_position_startpos_moves() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("position startpos moves e2e4 e7e5");
         // Strict EP: no white pawn on d5/f5 to capture, so EP square is "-"
         assert_eq!(
@@ -621,7 +674,7 @@ mod tests {
 
     #[test]
     fn parse_position_fen() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         let fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
         engine.handle_command(&format!("position fen {fen}"));
         assert_eq!(engine.board.to_fen(), fen);
@@ -629,7 +682,7 @@ mod tests {
 
     #[test]
     fn parse_position_fen_with_moves() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command(
             "position fen rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1 moves e7e5",
         );
@@ -642,7 +695,7 @@ mod tests {
 
     #[test]
     fn ucinewgame_resets() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("position startpos moves e2e4");
         engine.handle_command("ucinewgame");
         assert_eq!(engine.board.to_fen(), Board::STARTPOS_FEN);
@@ -650,31 +703,31 @@ mod tests {
 
     #[test]
     fn setoption_hash() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("setoption name Hash value 32");
     }
 
     #[test]
     fn setoption_threads() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("setoption name Threads value 4");
     }
 
     #[test]
     fn quit_returns_true() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         assert!(engine.handle_command("quit"));
     }
 
     #[test]
     fn unknown_command_ignored() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         assert!(!engine.handle_command("foobar"));
     }
 
     #[test]
     fn go_depth_and_stop() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("position startpos");
         engine.handle_command("go depth 3");
         // Stop the search and recover pool
@@ -684,7 +737,7 @@ mod tests {
 
     #[test]
     fn position_with_castling_moves() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         // Play to a position where castling has occurred
         engine
             .handle_command("position startpos moves e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 d2d3 f8e7 e1g1");
@@ -698,7 +751,7 @@ mod tests {
 
     #[test]
     fn position_with_promotion() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         // Position where white pawn promotes
         engine.handle_command("position fen 8/P7/8/8/8/8/8/4K2k w - - 0 1 moves a7a8q");
         let fen = engine.board.to_fen();
@@ -710,7 +763,7 @@ mod tests {
 
     #[test]
     fn multiple_go_commands() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("position startpos");
         engine.handle_command("go depth 2");
         engine.handle_command("stop");
@@ -722,7 +775,7 @@ mod tests {
 
     #[test]
     fn ucinewgame_clears_tt() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("position startpos");
         engine.handle_command("go depth 3");
         engine.handle_command("stop");
@@ -735,7 +788,7 @@ mod tests {
 
     #[test]
     fn empty_go_treated_as_infinite() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("position startpos");
         // "go" with no params = infinite search
         engine.handle_command("go");
@@ -747,7 +800,7 @@ mod tests {
 
     #[test]
     fn invalid_fen_ignored() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         let original_fen = engine.board.to_fen();
         engine.handle_command("position fen totally_invalid_fen");
         // Board should remain unchanged
@@ -756,7 +809,7 @@ mod tests {
 
     #[test]
     fn invalid_move_stops_apply() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         // First move valid, second invalid - should stop at invalid
         engine.handle_command("position startpos moves e2e4 zzzz");
         // Only e2e4 should have been applied
@@ -766,7 +819,7 @@ mod tests {
 
     #[test]
     fn go_ponder_sets_ponder_flag() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("position startpos");
         engine.handle_command("go ponder wtime 60000 btime 60000");
         // Ponder flag should be set
@@ -781,7 +834,7 @@ mod tests {
 
     #[test]
     fn ponderhit_transitions_to_normal_search() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("position startpos");
         engine.handle_command("go ponder wtime 60000 btime 60000");
         // Let it ponder briefly
@@ -799,7 +852,7 @@ mod tests {
 
     #[test]
     fn ponderhit_without_ponder_is_noop() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         // ponderhit when not pondering should do nothing
         engine.handle_command("ponderhit");
         assert!(engine.ponder_flag.is_none());
@@ -807,7 +860,7 @@ mod tests {
 
     #[test]
     fn go_without_ponder_clears_ponder_state() {
-        let mut engine = UciEngine::new();
+        let mut engine = UciEngine::new(None);
         engine.handle_command("position startpos");
         // First do a ponder search
         engine.handle_command("go ponder depth 3");
@@ -817,5 +870,165 @@ mod tests {
         engine.handle_command("go depth 3");
         assert!(engine.ponder_flag.is_none());
         engine.handle_command("stop");
+    }
+
+    // --- NNUE network loading tests ---
+
+    fn write_test_network(name: &str) -> std::path::PathBuf {
+        let weights = rage_nnue::NnueWeights::random(42);
+        let bytes = weights.to_bytes();
+        let dir = std::env::temp_dir().join("rage_uci_tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.nnue"));
+        std::fs::write(&path, &bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn engine_constructed_with_network() {
+        let weights = rage_nnue::NnueWeights::random(42);
+        let network = Arc::new(NnueNetwork::new(weights));
+        let engine = UciEngine::new(Some(network));
+        let pool = engine.pool.as_ref().unwrap();
+        assert!(
+            pool.network().is_some(),
+            "pool should have network when constructed with one"
+        );
+    }
+
+    #[test]
+    fn engine_constructed_without_network() {
+        let engine = UciEngine::new(None);
+        let pool = engine.pool.as_ref().unwrap();
+        assert!(
+            pool.network().is_none(),
+            "pool should have no network by default"
+        );
+    }
+
+    #[test]
+    fn load_network_from_valid_file() {
+        let path = write_test_network("load_valid");
+        let mut engine = UciEngine::new(None);
+        engine.load_network(path.to_str().unwrap());
+        let pool = engine.pool.as_ref().unwrap();
+        assert!(
+            pool.network().is_some(),
+            "network should be loaded from valid file"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_network_invalid_path_graceful() {
+        let mut engine = UciEngine::new(None);
+        engine.load_network("/tmp/does_not_exist_rage_test.nnue");
+        // Should not crash, should fall back to no network
+        let pool = engine.pool.as_ref().unwrap();
+        assert!(
+            pool.network().is_none(),
+            "invalid path should not load a network"
+        );
+    }
+
+    #[test]
+    fn load_network_empty_clears_network() {
+        let path = write_test_network("load_empty_clear");
+        let mut engine = UciEngine::new(None);
+        engine.load_network(path.to_str().unwrap());
+        assert!(engine.pool.as_ref().unwrap().network().is_some());
+
+        // Clear with empty string
+        engine.load_network("");
+        assert!(
+            engine.pool.as_ref().unwrap().network().is_none(),
+            "empty string should clear the network"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_network_empty_tag_clears_network() {
+        let path = write_test_network("load_tag_clear");
+        let mut engine = UciEngine::new(None);
+        engine.load_network(path.to_str().unwrap());
+        assert!(engine.pool.as_ref().unwrap().network().is_some());
+
+        // Clear with <empty> tag (matches UCI advertised default)
+        engine.load_network("<empty>");
+        assert!(
+            engine.pool.as_ref().unwrap().network().is_none(),
+            "<empty> should clear the network"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn setoption_evalfile_loads_network() {
+        let path = write_test_network("setoption_eval");
+        let mut engine = UciEngine::new(None);
+        engine.handle_command(&format!(
+            "setoption name EvalFile value {}",
+            path.to_str().unwrap()
+        ));
+        assert!(
+            engine.pool.as_ref().unwrap().network().is_some(),
+            "setoption EvalFile should load the network"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn setoption_evalfile_invalid_path_no_crash() {
+        let mut engine = UciEngine::new(None);
+        engine.handle_command("setoption name EvalFile value /tmp/nonexistent_rage.nnue");
+        assert!(
+            engine.pool.as_ref().unwrap().network().is_none(),
+            "invalid EvalFile should not set a network"
+        );
+    }
+
+    #[test]
+    fn network_survives_ucinewgame() {
+        let path = write_test_network("survives_newgame");
+        let mut engine = UciEngine::new(None);
+        engine.load_network(path.to_str().unwrap());
+        assert!(engine.pool.as_ref().unwrap().network().is_some());
+
+        engine.handle_command("ucinewgame");
+        assert!(
+            engine.pool.as_ref().unwrap().network().is_some(),
+            "ucinewgame should not drop the network"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn network_survives_thread_change() {
+        let path = write_test_network("survives_threads");
+        let mut engine = UciEngine::new(None);
+        engine.load_network(path.to_str().unwrap());
+
+        engine.handle_command("setoption name Threads value 4");
+        assert!(
+            engine.pool.as_ref().unwrap().network().is_some(),
+            "changing threads should preserve the network"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn search_with_loaded_network() {
+        let path = write_test_network("search_loaded");
+        let mut engine = UciEngine::new(None);
+        engine.load_network(path.to_str().unwrap());
+        engine.handle_command("position startpos");
+        engine.handle_command("go depth 3");
+        engine.handle_command("stop");
+        assert!(
+            engine.pool.is_some(),
+            "pool should be recovered after search with NNUE"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

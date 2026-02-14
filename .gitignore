@@ -27,4 +27,8 @@ target
 # Added by cargo
 
 /target
+
+# NNUE Models
+
+/model
 *.bin

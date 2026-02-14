@@ -190,6 +190,15 @@ impl Searcher {
         }
     }
 
+    /// Evaluate the current position with NNUE only. Returns `None` if no network is loaded.
+    /// Uses ply 0 accumulator with a full refresh.
+    pub fn evaluate_nnue(&mut self, board: &Board) -> Option<i32> {
+        let net = self.network.as_ref()?;
+        let acc = &mut self.accumulators[0];
+        net.refresh_accumulator(board, acc);
+        Some(net.forward(acc, board.side_to_move()))
+    }
+
     /// Update the accumulator at `child_ply` from `parent_ply` after a move.
     /// Must be called AFTER board.make_move(m).
     #[allow(clippy::too_many_arguments)]
@@ -1386,6 +1395,75 @@ mod tests {
             found_nonzero,
             "cont_history should have non-zero entries after depth-6 search"
         );
+    }
+
+    #[test]
+    fn evaluate_nnue_returns_none_without_network() {
+        let board = Board::from_fen(Board::STARTPOS_FEN).unwrap();
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
+        assert!(
+            searcher.evaluate_nnue(&board).is_none(),
+            "evaluate_nnue should return None when no network is loaded"
+        );
+        // Also verify network() reports None
+        assert!(searcher.network().is_none());
+    }
+
+    #[test]
+    fn evaluate_nnue_returns_score_with_network() {
+        let board = Board::from_fen(Board::STARTPOS_FEN).unwrap();
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
+        let weights = rage_nnue::NnueWeights::random(42);
+        let network = Arc::new(NnueNetwork::new(weights));
+        searcher.set_network(Some(network));
+
+        let score = searcher.evaluate_nnue(&board);
+        assert!(score.is_some(), "should return a score with network loaded");
+        // Also verify network() reports Some
+        assert!(searcher.network().is_some());
+    }
+
+    #[test]
+    fn evaluate_nnue_works_on_multiple_positions() {
+        let weights = rage_nnue::NnueWeights::random(42);
+        let network = Arc::new(NnueNetwork::new(weights));
+
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
+        searcher.set_network(Some(network));
+
+        // Verify evaluate_nnue succeeds on a variety of positions
+        let fens = [
+            Board::STARTPOS_FEN,
+            "rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "4k3/8/8/8/8/8/3Q4/4K3 w - - 0 1",
+        ];
+        for fen in fens {
+            let board = Board::from_fen(fen).unwrap();
+            let score = searcher.evaluate_nnue(&board);
+            assert!(score.is_some(), "evaluate_nnue should succeed for {fen}");
+        }
+    }
+
+    #[test]
+    fn search_with_nnue_produces_result() {
+        // Verify the full search works when an NNUE network is loaded
+        let mut board = Board::from_fen(Board::STARTPOS_FEN).unwrap();
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
+        let weights = rage_nnue::NnueWeights::random(42);
+        searcher.set_network(Some(Arc::new(NnueNetwork::new(weights))));
+
+        let limits = SearchLimits {
+            depth: Some(4),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let result = searcher.search(&mut board, &limits, stop, None);
+        assert!(
+            !result.best_move.is_null(),
+            "NNUE search should find a move"
+        );
+        assert!(result.nodes > 0, "NNUE search should visit nodes");
     }
 
     #[test]

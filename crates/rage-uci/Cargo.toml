@@ -8,4 +8,5 @@ workspace = true
 
 [dependencies]
 rage-core = { path = "../rage-core" }
+rage-nnue = { path = "../rage-nnue" }
 rage-search = { path = "../rage-search" }

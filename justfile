@@ -1,5 +1,5 @@
 # Formats, lints, and runs all tests
-default: fmt lint test
+default: fmt check lint test
 
 # First, install rustup with: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`, then run this
 install-tools:

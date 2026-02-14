@@ -91,6 +91,18 @@ impl ThreadPool {
         }
     }
 
+    /// Get the NNUE network from the first searcher (if any).
+    pub fn network(&self) -> Option<&Arc<NnueNetwork>> {
+        self.searchers.first().and_then(|s| s.network().as_ref())
+    }
+
+    /// Evaluate the current position with NNUE (if a network is loaded).
+    /// Returns `None` if no network is loaded.
+    pub fn evaluate_nnue(&mut self, board: &Board) -> Option<i32> {
+        let searcher = self.searchers.first_mut()?;
+        searcher.evaluate_nnue(board)
+    }
+
     /// Total nodes searched across all threads.
     pub fn total_nodes(&self) -> u64 {
         self.thread_nodes
@@ -353,6 +365,141 @@ mod tests {
         pool.set_num_threads(2);
         assert_eq!(pool.num_threads, 2);
         assert_eq!(pool.searchers.len(), 2);
+    }
+
+    fn make_test_network() -> Arc<NnueNetwork> {
+        let weights = rage_nnue::NnueWeights::random(42);
+        Arc::new(NnueNetwork::new(weights))
+    }
+
+    #[test]
+    fn network_returns_none_by_default() {
+        let pool = ThreadPool::new(1, 16);
+        assert!(pool.network().is_none(), "new pool should have no network");
+    }
+
+    #[test]
+    fn set_network_propagates_to_all_threads() {
+        let mut pool = ThreadPool::new(4, 16);
+        let network = make_test_network();
+        pool.set_network(Some(network));
+
+        assert!(pool.network().is_some(), "pool should report network");
+        for (i, s) in pool.searchers.iter().enumerate() {
+            assert!(s.network().is_some(), "thread {i} should have the network");
+        }
+    }
+
+    #[test]
+    fn set_network_none_clears_all_threads() {
+        let mut pool = ThreadPool::new(2, 16);
+        pool.set_network(Some(make_test_network()));
+        assert!(pool.network().is_some());
+
+        pool.set_network(None);
+        assert!(pool.network().is_none(), "should be cleared");
+        for (i, s) in pool.searchers.iter().enumerate() {
+            assert!(
+                s.network().is_none(),
+                "thread {i} should have no network after clear"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_nnue_without_network() {
+        let mut pool = ThreadPool::new(1, 16);
+        let board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        assert!(
+            pool.evaluate_nnue(&board).is_none(),
+            "should return None without network"
+        );
+    }
+
+    #[test]
+    fn evaluate_nnue_with_network() {
+        let mut pool = ThreadPool::new(1, 16);
+        pool.set_network(Some(make_test_network()));
+
+        let board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        assert!(
+            pool.evaluate_nnue(&board).is_some(),
+            "should return a score with network loaded"
+        );
+    }
+
+    #[test]
+    fn network_survives_set_num_threads() {
+        let mut pool = ThreadPool::new(1, 16);
+        pool.set_network(Some(make_test_network()));
+
+        // Scale up — new threads should inherit the network
+        pool.set_num_threads(4);
+        assert!(pool.network().is_some(), "network should survive resize up");
+        for (i, s) in pool.searchers.iter().enumerate() {
+            assert!(
+                s.network().is_some(),
+                "thread {i} should have network after resize up"
+            );
+        }
+
+        // Scale down — remaining threads should keep the network
+        pool.set_num_threads(2);
+        assert!(
+            pool.network().is_some(),
+            "network should survive resize down"
+        );
+    }
+
+    #[test]
+    fn network_survives_clear() {
+        let mut pool = ThreadPool::new(2, 16);
+        pool.set_network(Some(make_test_network()));
+
+        // Search to populate TT and history
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let limits = SearchLimits {
+            depth: Some(4),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        pool.search(&mut board, &limits, stop, None);
+
+        pool.clear();
+        // Network should still be set after clearing TT and history
+        assert!(
+            pool.network().is_some(),
+            "clear() should not drop the network"
+        );
+        for (i, s) in pool.searchers.iter().enumerate() {
+            assert!(
+                s.network().is_some(),
+                "thread {i} should still have network after clear"
+            );
+        }
+    }
+
+    #[test]
+    fn search_with_nnue_network() {
+        let mut pool = ThreadPool::new(2, 16);
+        pool.set_network(Some(make_test_network()));
+
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let limits = SearchLimits {
+            depth: Some(4),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let result = pool.search(&mut board, &limits, stop, None);
+        assert!(
+            !result.best_move.is_null(),
+            "NNUE search should find a move"
+        );
+        assert!(result.nodes > 0);
     }
 
     #[test]

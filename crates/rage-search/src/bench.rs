@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use rage_core::Board;
+use rage_nnue::NnueNetwork;
 
 use crate::search::Searcher;
 use crate::time::SearchLimits;
@@ -66,9 +67,11 @@ pub struct BenchResult {
 
 /// Run the benchmark: search each position at the given depth, accumulate nodes.
 /// TT is shared across positions (not cleared between them).
-pub fn run_bench(depth: u32) -> BenchResult {
+/// If `network` is provided, NNUE evaluation is used instead of PST.
+pub fn run_bench(depth: u32, network: Option<Arc<NnueNetwork>>) -> BenchResult {
     let tt = Arc::new(TranspositionTable::new(BENCH_TT_MB));
     let mut searcher = Searcher::new(tt);
+    searcher.set_network(network);
     let stop = Arc::new(AtomicBool::new(false));
     let limits = SearchLimits {
         depth: Some(depth),
