@@ -185,6 +185,24 @@ impl Default for MoveList {
     }
 }
 
+impl std::ops::Index<usize> for MoveList {
+    type Output = Move;
+
+    fn index(&self, idx: usize) -> &Move {
+        debug_assert!(idx < self.len);
+        &self.moves[idx]
+    }
+}
+
+impl<'a> IntoIterator for &'a MoveList {
+    type Item = &'a Move;
+    type IntoIter = std::slice::Iter<'a, Move>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.moves[..self.len].iter()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -247,6 +265,24 @@ mod tests {
             assert!(m.is_promotion());
             assert_eq!(m.promotion_piece(), pt);
         }
+    }
+
+    #[test]
+    fn movelist_index() {
+        let mut list = MoveList::new();
+        list.push(Move::new(Square::E2, Square::E4));
+        list.push(Move::new(Square::D2, Square::D4));
+        assert_eq!(list[0].from_sq(), Square::E2);
+        assert_eq!(list[1].from_sq(), Square::D2);
+    }
+
+    #[test]
+    fn movelist_into_iter() {
+        let mut list = MoveList::new();
+        list.push(Move::new(Square::E2, Square::E4));
+        list.push(Move::new(Square::D2, Square::D4));
+        let collected: Vec<_> = (&list).into_iter().collect();
+        assert_eq!(collected.len(), 2);
     }
 
     #[test]

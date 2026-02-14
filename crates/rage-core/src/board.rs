@@ -20,6 +20,19 @@ pub struct UndoInfo {
     pub zobrist: u64,
 }
 
+impl UndoInfo {
+    const EMPTY: Self = Self {
+        captured_piece: None,
+        castling: CastlingRights::NONE,
+        en_passant: None,
+        halfmove_clock: 0,
+        zobrist: 0,
+    };
+}
+
+/// Maximum number of undo entries stored in the history.
+const MAX_HISTORY: usize = 1024;
+
 /// Complete chess position state.
 #[derive(Clone)]
 pub struct Board {
@@ -41,8 +54,10 @@ pub struct Board {
     fullmove_number: u16,
     /// Zobrist hash of the position.
     zobrist: u64,
-    /// Undo stack for unmake.
-    history: Vec<UndoInfo>,
+    /// Undo stack for unmake (fixed-size, no heap allocation).
+    history: [UndoInfo; MAX_HISTORY],
+    /// Number of entries in the undo stack.
+    history_len: usize,
 }
 
 impl Board {
@@ -60,15 +75,16 @@ impl Board {
             halfmove_clock: 0,
             fullmove_number: 1,
             zobrist: 0,
-            history: Vec::new(),
+            history: [UndoInfo::EMPTY; MAX_HISTORY],
+            history_len: 0,
         }
     }
 
     /// Create the standard starting position.
+    #[allow(clippy::unwrap_used)]
     pub fn starting_position() -> Self {
-        // This is safe because the starting FEN is always valid
-        Self::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-            .unwrap_or_else(|_| Self::empty())
+        // STARTPOS_FEN is a compile-time constant and always valid.
+        Self::from_fen(Self::STARTPOS_FEN).unwrap()
     }
 
     // --- Piece manipulation ---
@@ -212,6 +228,79 @@ impl Board {
         self.is_attacked(king_sq, !self.side_to_move)
     }
 
+    /// Check if a move is a capture in this position.
+    pub fn is_capture(&self, m: crate::moves::Move) -> bool {
+        m.is_en_passant() || self.piece_on(m.to_sq()).is_some()
+    }
+
+    // --- Draw detection ---
+
+    /// Returns true if the 50-move rule threshold has been reached (100 half-moves).
+    pub fn is_fifty_move_draw(&self) -> bool {
+        self.halfmove_clock >= 100
+    }
+
+    /// Returns true if the position has insufficient material for either side to checkmate.
+    ///
+    /// Detected cases: K vs K, K+N vs K, K+B vs K, K+B vs K+B (same-color bishops).
+    pub fn is_insufficient_material(&self) -> bool {
+        if self.piece_bb(PieceType::Pawn).is_not_empty()
+            || self.piece_bb(PieceType::Rook).is_not_empty()
+            || self.piece_bb(PieceType::Queen).is_not_empty()
+        {
+            return false;
+        }
+
+        let white_knights = self.pieces(Color::White, PieceType::Knight).popcount();
+        let black_knights = self.pieces(Color::Black, PieceType::Knight).popcount();
+        let white_bishops = self.pieces(Color::White, PieceType::Bishop).popcount();
+        let black_bishops = self.pieces(Color::Black, PieceType::Bishop).popcount();
+
+        let white_minors = white_knights + white_bishops;
+        let black_minors = black_knights + black_bishops;
+
+        // K vs K
+        if white_minors == 0 && black_minors == 0 {
+            return true;
+        }
+
+        // K+minor vs K
+        if (white_minors == 1 && black_minors == 0) || (white_minors == 0 && black_minors == 1) {
+            return true;
+        }
+
+        // K+B vs K+B with same-color bishops
+        if white_minors == 1
+            && black_minors == 1
+            && white_knights == 0
+            && black_knights == 0
+            && let (Some(wb), Some(bb)) = (
+                self.pieces(Color::White, PieceType::Bishop).lsb(),
+                self.pieces(Color::Black, PieceType::Bishop).lsb(),
+            )
+        {
+            let wb_parity = (wb.file().index() + wb.rank().index()) % 2;
+            let bb_parity = (bb.file().index() + bb.rank().index()) % 2;
+            return wb_parity == bb_parity;
+        }
+
+        false
+    }
+
+    /// Returns true if the current position has occurred at least once before
+    /// in the game history (twofold repetition).
+    pub fn is_repetition(&self) -> bool {
+        let limit = self.halfmove_clock as usize;
+        let mut steps = 2;
+        while steps <= limit && steps <= self.history_len {
+            if self.history[self.history_len - steps].zobrist == self.zobrist {
+                return true;
+            }
+            steps += 2;
+        }
+        false
+    }
+
     // --- Setters (for FEN parsing) ---
 
     pub fn set_side_to_move(&mut self, color: Color) {
@@ -262,13 +351,15 @@ impl Board {
         };
 
         // Save undo info with all fields fully populated.
-        self.history.push(UndoInfo {
+        debug_assert!(self.history_len < MAX_HISTORY);
+        self.history[self.history_len] = UndoInfo {
             captured_piece: undo_captured,
             castling: self.castling,
             en_passant: self.en_passant,
             halfmove_clock: self.halfmove_clock,
             zobrist: self.zobrist,
-        });
+        };
+        self.history_len += 1;
 
         // Update Zobrist: remove old en passant and castling
         self.zobrist ^= zobrist::ep_key(self.en_passant.map(|sq| sq.file()));
@@ -367,10 +458,11 @@ impl Board {
 
     /// Unmake a move, restoring the board to its previous state.
     pub fn unmake_move(&mut self, m: crate::moves::Move) {
-        let undo = match self.history.pop() {
-            Some(u) => u,
-            None => return,
-        };
+        if self.history_len == 0 {
+            return;
+        }
+        self.history_len -= 1;
+        let undo = self.history[self.history_len];
 
         // Flip side back
         self.side_to_move = !self.side_to_move;
@@ -815,6 +907,105 @@ mod tests {
         for sq in Square::ALL {
             assert!(board.piece_on(sq).is_none());
         }
+    }
+
+    #[test]
+    fn is_capture_detection() {
+        let board = Board::from_fen("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2")
+            .unwrap();
+        // e4xd5 is a capture
+        let capture = crate::moves::Move::new(Square::E4, Square::D5);
+        assert!(board.is_capture(capture));
+        // Nc3 is not a capture
+        let quiet = crate::moves::Move::new(Square::E4, Square::E5);
+        assert!(!board.is_capture(quiet));
+    }
+
+    #[test]
+    fn is_capture_en_passant() {
+        let board =
+            Board::from_fen("rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3")
+                .unwrap();
+        let ep = crate::moves::Move::new_en_passant(Square::E5, Square::F6);
+        assert!(board.is_capture(ep));
+    }
+
+    #[test]
+    fn fifty_move_draw() {
+        let board = Board::from_fen("8/8/8/4k3/8/8/8/4K3 w - - 100 200").unwrap();
+        assert!(board.is_fifty_move_draw());
+
+        let board = Board::from_fen("8/8/8/4k3/8/8/8/4K3 w - - 99 200").unwrap();
+        assert!(!board.is_fifty_move_draw());
+    }
+
+    #[test]
+    fn insufficient_material_k_vs_k() {
+        let board = Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(board.is_insufficient_material());
+    }
+
+    #[test]
+    fn insufficient_material_kn_vs_k() {
+        let board = Board::from_fen("4k3/8/8/8/8/8/8/3NK3 w - - 0 1").unwrap();
+        assert!(board.is_insufficient_material());
+        let board = Board::from_fen("3nk3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(board.is_insufficient_material());
+    }
+
+    #[test]
+    fn insufficient_material_kb_vs_k() {
+        let board = Board::from_fen("4k3/8/8/8/8/8/8/3BK3 w - - 0 1").unwrap();
+        assert!(board.is_insufficient_material());
+    }
+
+    #[test]
+    fn insufficient_material_kb_vs_kb_same_color() {
+        // Both bishops on dark squares (c1 and f8)
+        let board = Board::from_fen("5b2/8/8/8/8/8/8/2B1K2k w - - 0 1").unwrap();
+        assert!(board.is_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_material_kb_vs_kb_diff_color() {
+        // White bishop on dark (c1), black bishop on light (c8)
+        let board = Board::from_fen("2b1k3/8/8/8/8/8/8/2B1K3 w - - 0 1").unwrap();
+        assert!(!board.is_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_material_with_pawns() {
+        let board = Board::from_fen("4k3/p7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(!board.is_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_material_with_rook() {
+        let board = Board::from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 0 1").unwrap();
+        assert!(!board.is_insufficient_material());
+    }
+
+    #[test]
+    fn repetition_detection() {
+        let mut board = Board::starting_position();
+        // Nf3 Nf6 Ng1 Ng8 → back to starting position
+        let nf3 = crate::moves::Move::new(Square::G1, Square::F3);
+        let nf6 = crate::moves::Move::new(Square::G8, Square::F6);
+        let ng1 = crate::moves::Move::new(Square::F3, Square::G1);
+        let ng8 = crate::moves::Move::new(Square::F6, Square::G8);
+
+        board.make_move(nf3);
+        board.make_move(nf6);
+        board.make_move(ng1);
+        board.make_move(ng8);
+
+        assert!(board.is_repetition());
+    }
+
+    #[test]
+    fn no_repetition_at_start() {
+        let board = Board::starting_position();
+        assert!(!board.is_repetition());
     }
 
     // Strict en passant: double push only records EP if enemy pawn can capture

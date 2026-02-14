@@ -7,7 +7,7 @@ use crate::attacks;
 use crate::bitboard::Bitboard;
 use crate::board::Board;
 use crate::moves::{Move, MoveList};
-use crate::types::{Color, PieceType, Square};
+use crate::types::{Color, File, PieceType, Rank, Square};
 
 impl Board {
     /// Generate all legal moves for the side to move.
@@ -30,6 +30,63 @@ impl Board {
             self.unmake_move(m);
         }
         legal
+    }
+
+    /// Returns true if the side to move is in checkmate.
+    pub fn is_checkmate(&mut self) -> bool {
+        self.in_check() && self.generate_legal_moves().is_empty()
+    }
+
+    /// Returns true if the side to move is in stalemate.
+    pub fn is_stalemate(&mut self) -> bool {
+        !self.in_check() && self.generate_legal_moves().is_empty()
+    }
+
+    /// Parse a UCI long algebraic notation move (e.g. "e2e4", "e7e8q") and return
+    /// the matching legal move. Returns an error if the string is malformed or
+    /// the move is not legal in the current position.
+    pub fn parse_uci_move(&mut self, s: &str) -> crate::Result<Move> {
+        let bytes = s.as_bytes();
+        if bytes.len() < 4 || bytes.len() > 5 {
+            return Err(crate::Error::InvalidMove(s.to_string()));
+        }
+
+        let from_file = File::from_char(bytes[0] as char)
+            .ok_or_else(|| crate::Error::InvalidMove(s.to_string()))?;
+        let from_rank = Rank::from_char(bytes[1] as char)
+            .ok_or_else(|| crate::Error::InvalidMove(s.to_string()))?;
+        let to_file = File::from_char(bytes[2] as char)
+            .ok_or_else(|| crate::Error::InvalidMove(s.to_string()))?;
+        let to_rank = Rank::from_char(bytes[3] as char)
+            .ok_or_else(|| crate::Error::InvalidMove(s.to_string()))?;
+
+        let from = Square::from_file_rank(from_file, from_rank);
+        let to = Square::from_file_rank(to_file, to_rank);
+
+        let promo = if bytes.len() == 5 {
+            Some(match bytes[4] {
+                b'n' => PieceType::Knight,
+                b'b' => PieceType::Bishop,
+                b'r' => PieceType::Rook,
+                b'q' => PieceType::Queen,
+                _ => return Err(crate::Error::InvalidMove(s.to_string())),
+            })
+        } else {
+            None
+        };
+
+        let moves = self.generate_legal_moves();
+        for &m in moves.as_slice() {
+            if m.from_sq() == from && m.to_sq() == to {
+                match promo {
+                    Some(pt) if m.is_promotion() && m.promotion_piece() == pt => return Ok(m),
+                    None if !m.is_promotion() => return Ok(m),
+                    _ => {}
+                }
+            }
+        }
+
+        Err(crate::Error::InvalidMove(s.to_string()))
     }
 
     /// Generate pseudo-legal moves (may include moves that leave the king in check).
@@ -685,6 +742,62 @@ mod tests {
                 board.unmake_move(m);
             }
         }
+    }
+
+    #[test]
+    fn is_checkmate_fools_mate() {
+        let mut board =
+            Board::from_fen("rnb1kbnr/pppp1ppp/4p3/8/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3")
+                .unwrap();
+        assert!(board.is_checkmate());
+        assert!(!board.is_stalemate());
+    }
+
+    #[test]
+    fn is_stalemate_basic() {
+        let mut board = Board::from_fen("5k2/5P2/5K2/8/8/8/8/8 b - - 0 1").unwrap();
+        assert!(board.is_stalemate());
+        assert!(!board.is_checkmate());
+    }
+
+    #[test]
+    fn not_checkmate_or_stalemate() {
+        let mut board = Board::starting_position();
+        assert!(!board.is_checkmate());
+        assert!(!board.is_stalemate());
+    }
+
+    #[test]
+    fn parse_uci_normal_move() {
+        let mut board = Board::starting_position();
+        let m = board.parse_uci_move("e2e4").unwrap();
+        assert_eq!(m.from_sq(), Square::E2);
+        assert_eq!(m.to_sq(), Square::E4);
+        assert!(!m.is_promotion());
+    }
+
+    #[test]
+    fn parse_uci_promotion() {
+        let mut board = Board::from_fen("4k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let m = board.parse_uci_move("a7a8q").unwrap();
+        assert!(m.is_promotion());
+        assert_eq!(m.promotion_piece(), PieceType::Queen);
+    }
+
+    #[test]
+    fn parse_uci_castling() {
+        let mut board =
+            Board::from_fen("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
+        let m = board.parse_uci_move("e1g1").unwrap();
+        assert!(m.is_castling());
+    }
+
+    #[test]
+    fn parse_uci_invalid() {
+        let mut board = Board::starting_position();
+        assert!(board.parse_uci_move("e2e5").is_err());
+        assert!(board.parse_uci_move("xx").is_err());
+        assert!(board.parse_uci_move("").is_err());
     }
 
     // Verify divide returns same total as perft
