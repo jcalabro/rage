@@ -7,7 +7,7 @@ use rage_core::Board;
 use rage_search::search::{InfoCallback, Searcher};
 use rage_search::time::SearchLimits;
 
-const ENGINE_NAME: &str = "Rage";
+const ENGINE_NAME: &str = "rage";
 const ENGINE_AUTHOR: &str = "jcalabro";
 
 /// Default transposition table size in MB.
