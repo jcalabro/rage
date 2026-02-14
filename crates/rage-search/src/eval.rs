@@ -206,9 +206,9 @@ const EG_PST: [[i32; Square::NUM]; PieceType::NUM] = [
     EG_KING_TABLE,
 ];
 
-/// Evaluate the position from the side-to-move's perspective.
-/// Returns score in centipawns.
-pub fn evaluate(board: &Board) -> i32 {
+/// Evaluate the position from the side-to-move's perspective using PST.
+/// Returns score in centipawns. Used as fallback when no NNUE network is loaded.
+pub fn evaluate_pst(board: &Board) -> i32 {
     let mut mg_score = [0i32; Color::NUM];
     let mut eg_score = [0i32; Color::NUM];
     let mut phase = 0i32;
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn starting_position_roughly_zero() {
         let board = Board::starting_position();
-        let score = evaluate(&board);
+        let score = evaluate_pst(&board);
         // Starting position should be roughly equal (within PST asymmetry + tempo)
         assert!(
             score.abs() < 50,
@@ -270,7 +270,7 @@ mod tests {
         // White has an extra queen
         let board =
             Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
-        let score = evaluate(&board);
+        let score = evaluate_pst(&board);
         assert!(score > 800, "should be winning for white, got {score}");
     }
 
@@ -278,7 +278,7 @@ mod tests {
     fn black_up_queen() {
         let board =
             Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR b KQkq - 0 1").unwrap();
-        let score = evaluate(&board);
+        let score = evaluate_pst(&board);
         assert!(
             score > 800,
             "should be winning for black (STM), got {score}"
@@ -292,8 +292,8 @@ mod tests {
         let black_fen = "rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         let white_board = Board::from_fen(white_fen).unwrap();
         let black_board = Board::from_fen(black_fen).unwrap();
-        let w_score = evaluate(&white_board);
-        let b_score = evaluate(&black_board);
+        let w_score = evaluate_pst(&white_board);
+        let b_score = evaluate_pst(&black_board);
         assert_eq!(
             w_score, b_score,
             "mirrored positions should have equal eval"
@@ -305,8 +305,8 @@ mod tests {
         // King in center should be better in endgame
         let center_king = Board::from_fen("8/8/8/3K4/8/8/8/4k3 w - - 0 1").unwrap();
         let corner_king = Board::from_fen("K7/8/8/8/8/8/8/4k3 w - - 0 1").unwrap();
-        let center_score = evaluate(&center_king);
-        let corner_score = evaluate(&corner_king);
+        let center_score = evaluate_pst(&center_king);
+        let corner_score = evaluate_pst(&corner_king);
         assert!(
             center_score > corner_score,
             "center king ({center_score}) should be better than corner ({corner_score})"

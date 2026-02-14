@@ -1,0 +1,22 @@
+[package]
+name = "rage-train"
+version.workspace = true
+edition.workspace = true
+
+# Use custom lints for training tool (less strict than engine crates)
+[lints.clippy]
+all = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"
+
+[lints.rust]
+dead_code = "allow"
+
+[dependencies]
+rage-core = { path = "../rage-core" }
+rage-nnue = { path = "../rage-nnue" }
+rage-search = { path = "../rage-search" }
+burn = "0.16"
+burn-ndarray = "0.16"
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"

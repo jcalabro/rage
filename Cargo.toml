@@ -2,9 +2,11 @@
 resolver = "3"
 members = [
     "crates/rage-core",
+    "crates/rage-nnue",
     "crates/rage-search",
     "crates/rage-uci",
     "crates/rage-engine",
+    "crates/rage-train",
 ]
 
 [workspace.package]

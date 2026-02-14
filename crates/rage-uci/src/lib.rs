@@ -413,7 +413,7 @@ impl UciEngine {
     }
 
     fn cmd_eval(&self) {
-        let score = rage_search::eval::evaluate(&self.board);
+        let score = rage_search::eval::evaluate_pst(&self.board);
         println!(
             "Static eval: {score} cp (from {} perspective)",
             self.board.side_to_move()

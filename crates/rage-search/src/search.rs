@@ -2,8 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use rage_core::{Board, Move, MoveList, PieceType};
+use rage_nnue::{Accumulator, NnueNetwork};
 
-use crate::eval::{INFINITY, MATE_SCORE, evaluate, piece_value};
+use crate::eval::{INFINITY, MATE_SCORE, evaluate_pst, piece_value};
 use crate::ordering::{
     CounterMoves, History, Killers, MAX_PLY, MoveOrderContext, pick_move, score_moves_into,
 };
@@ -119,10 +120,18 @@ pub struct Searcher {
     nodes: u64,
     seldepth: u32,
     stopped: bool,
+    /// NNUE network for evaluation. Falls back to PST eval when None.
+    network: Option<Arc<NnueNetwork>>,
+    /// Per-ply NNUE accumulators for incremental updates.
+    accumulators: Vec<Accumulator>,
 }
 
 impl Searcher {
     pub fn new(tt_size_mb: usize) -> Self {
+        let mut accumulators = Vec::with_capacity(MAX_PLY + 4);
+        for _ in 0..MAX_PLY + 4 {
+            accumulators.push(Accumulator::EMPTY);
+        }
         Self {
             tt: TranspositionTable::new(tt_size_mb),
             killers: Killers::new(),
@@ -134,6 +143,66 @@ impl Searcher {
             nodes: 0,
             seldepth: 0,
             stopped: false,
+            network: None,
+            accumulators,
+        }
+    }
+
+    /// Set the NNUE network for evaluation.
+    pub fn set_network(&mut self, network: Option<Arc<NnueNetwork>>) {
+        self.network = network;
+    }
+
+    /// Evaluate the position using NNUE with accumulator if available, otherwise PST.
+    fn evaluate(&mut self, board: &Board, ply: u32) -> i32 {
+        match &self.network {
+            Some(net) => {
+                let acc = &mut self.accumulators[ply as usize];
+                // If any perspective is dirty, do a full refresh
+                if acc.dirty[0] || acc.dirty[1] {
+                    net.refresh_accumulator(board, acc);
+                }
+                net.forward(acc, board.side_to_move())
+            }
+            None => evaluate_pst(board),
+        }
+    }
+
+    /// Update the accumulator at `child_ply` from `parent_ply` after a move.
+    /// Must be called AFTER board.make_move(m).
+    #[allow(clippy::too_many_arguments)]
+    fn update_acc_after_move(
+        &mut self,
+        board: &Board,
+        m: Move,
+        moved_piece: PieceType,
+        captured_piece: Option<PieceType>,
+        moving_color: rage_core::Color,
+        parent_ply: u32,
+        child_ply: u32,
+    ) {
+        if let Some(ref net) = self.network {
+            // We need to split the borrow: get parent (immutable) and child (mutable)
+            let (parent_slice, child_slice) = self.accumulators.split_at_mut(child_ply as usize);
+            let parent = &parent_slice[parent_ply as usize];
+            let child = &mut child_slice[0];
+            net.update_accumulator(
+                board,
+                parent,
+                child,
+                m,
+                moved_piece,
+                captured_piece,
+                moving_color,
+            );
+        }
+    }
+
+    /// Copy the accumulator from parent_ply to child_ply (for null moves).
+    fn copy_acc(&mut self, parent_ply: u32, child_ply: u32) {
+        if self.network.is_some() {
+            let parent = self.accumulators[parent_ply as usize].clone();
+            self.accumulators[child_ply as usize] = parent;
         }
     }
 
@@ -149,6 +218,11 @@ impl Searcher {
         self.nodes = 0;
         self.stopped = false;
         self.killers.clear();
+
+        // Initialize root accumulator for NNUE
+        if let Some(ref net) = self.network {
+            net.refresh_accumulator(board, &mut self.accumulators[0]);
+        }
 
         let mut tm = TimeManager::new(limits, board.side_to_move(), stop);
 
@@ -299,7 +373,7 @@ impl Searcher {
     ) -> i32 {
         // Ply overflow guard: return static eval at max depth
         if ply >= PLY_LIMIT {
-            return evaluate(board);
+            return self.evaluate(board, ply);
         }
 
         self.nodes += 1;
@@ -372,7 +446,11 @@ impl Searcher {
         };
 
         // Static evaluation (not useful when in check)
-        let static_eval = if in_check { -INFINITY } else { evaluate(board) };
+        let static_eval = if in_check {
+            -INFINITY
+        } else {
+            self.evaluate(board, ply)
+        };
         self.stack[ply as usize + 2].static_eval = static_eval;
 
         // Improving: is our static eval better than 2 plies ago?
@@ -402,6 +480,7 @@ impl Searcher {
             {
                 let r = 3 + depth / 6;
                 board.make_null_move();
+                self.copy_acc(ply, ply + 1);
                 let null_score = -self.negamax(
                     board,
                     tm,
@@ -527,7 +606,15 @@ impl Searcher {
                 num_searched_quiets += 1;
             }
 
+            // Capture info for NNUE accumulator update before make_move
+            let captured_pt = if m.is_en_passant() {
+                Some(PieceType::Pawn)
+            } else {
+                board.piece_on(m.to_sq()).map(|p| p.piece_type)
+            };
+
             board.make_move(m);
+            self.update_acc_after_move(board, m, piece_moved, captured_pt, stm, ply, ply + 1);
 
             // PVS: first move gets full window, rest get zero window
             let score;
@@ -658,7 +745,7 @@ impl Searcher {
     ) -> i32 {
         // Ply overflow guard
         if ply >= PLY_LIMIT {
-            return evaluate(board);
+            return self.evaluate(board, ply);
         }
 
         self.nodes += 1;
@@ -670,7 +757,7 @@ impl Searcher {
         }
 
         // Standing pat
-        let stand_pat = evaluate(board);
+        let stand_pat = self.evaluate(board, ply);
         if stand_pat >= beta {
             return stand_pat;
         }
@@ -728,7 +815,19 @@ impl Searcher {
             );
             let m = capture_buf[i];
 
+            // Capture info for NNUE accumulator update before make_move
+            let q_piece_moved = board
+                .piece_on(m.from_sq())
+                .map_or(PieceType::Pawn, |p| p.piece_type);
+            let q_captured_pt = if m.is_en_passant() {
+                Some(PieceType::Pawn)
+            } else {
+                board.piece_on(m.to_sq()).map(|p| p.piece_type)
+            };
+            let q_stm = board.side_to_move();
+
             board.make_move(m);
+            self.update_acc_after_move(board, m, q_piece_moved, q_captured_pt, q_stm, ply, ply + 1);
             let score = -self.quiescence(board, tm, -beta, -alpha, ply + 1);
             board.unmake_move(m);
 
