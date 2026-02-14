@@ -15,6 +15,9 @@ lint:
 fmt *ARGS:
     cargo fmt -- {{ARGS}}
 
+check *ARGS:
+    cargo check -- {{ARGS}}
+
 # Runs fast tests (skips #[ignore] tests)
 test *ARGS:
     cargo test {{ARGS}}
