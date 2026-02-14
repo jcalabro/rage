@@ -106,6 +106,7 @@ impl UciEngine {
                 return true;
             }
             // Debug commands
+            "bench" => self.cmd_bench(&mut tokens),
             "d" | "display" => self.cmd_display(),
             "dd" => self.cmd_display_pretty(),
             "eval" => self.cmd_eval(),
@@ -420,6 +421,15 @@ impl UciEngine {
         );
     }
 
+    fn cmd_bench<'a>(&mut self, tokens: &mut impl Iterator<Item = &'a str>) {
+        self.wait_for_search();
+        let depth = tokens
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(rage_search::bench::DEFAULT_BENCH_DEPTH);
+        rage_search::bench::run_bench(depth);
+    }
+
     fn cmd_perft<'a>(&mut self, tokens: &mut impl Iterator<Item = &'a str>) {
         let depth: u32 = match tokens.next().and_then(|s| s.parse().ok()) {
             Some(d) => d,
@@ -474,6 +484,7 @@ impl UciEngine {
         println!("  quit           Exit the engine");
         println!();
         println!("Debug commands:");
+        println!("  bench [depth]  Run search benchmark (default depth 13)");
         println!("  d / display    Show the current board");
         println!("  dd             Show the board with emoji pieces and colored squares");
         println!("  eval           Show static evaluation");

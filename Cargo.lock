@@ -3443,6 +3443,7 @@ name = "rage-engine"
 version = "0.1.0"
 dependencies = [
  "rage-core",
+ "rage-search",
  "rage-uci",
 ]
 

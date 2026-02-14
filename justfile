@@ -34,3 +34,7 @@ build *ARGS:
 # Builds and runs rage
 run *ARGS:
     cargo run --bin rage {{ARGS}}
+
+# Runs the benchmark (fixed-depth search over standard positions)
+bench *ARGS:
+    cargo run --release --bin rage -- bench {{ARGS}}
