@@ -1,4 +1,4 @@
-use rage_core::{Board, Color, Move, MoveList, PieceType, Square};
+use rage_core::{Board, Color, Move, PieceType, Square};
 
 use crate::eval::piece_value;
 use crate::see;
@@ -201,18 +201,17 @@ pub fn pick_move(moves: &mut [Move], scores: &mut [i32], start_idx: usize) {
     }
 }
 
-/// Score all moves in a move list.
-pub fn score_moves(
+/// Score all moves into a pre-allocated slice (avoids heap allocation).
+pub fn score_moves_into(
     board: &Board,
-    moves: &MoveList,
+    moves: &[Move],
+    scores: &mut [i32],
     ctx: &MoveOrderContext,
     history: &History,
-) -> Vec<i32> {
-    let mut scores = Vec::with_capacity(moves.len());
-    for m in moves {
-        scores.push(score_move(board, *m, ctx, history));
+) {
+    for (i, m) in moves.iter().enumerate() {
+        scores[i] = score_move(board, *m, ctx, history);
     }
-    scores
 }
 
 #[cfg(test)]

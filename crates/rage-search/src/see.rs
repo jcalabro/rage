@@ -1,7 +1,5 @@
 use rage_core::{Bitboard, Board, Color, Move, PieceType, Square, attacks};
 
-use crate::eval::piece_value;
-
 /// SEE piece values (same as eval piece values, but king gets a large value
 /// so it can participate in the exchange sequence correctly).
 const SEE_VALUES: [i32; PieceType::NUM] = [100, 320, 330, 500, 900, 20_000];
@@ -75,7 +73,7 @@ pub fn see(board: &Board, m: Move) -> i32 {
 
     // Determine initial gain
     let gain = if m.is_en_passant() {
-        piece_value(PieceType::Pawn)
+        see_piece_value(PieceType::Pawn)
     } else if m.is_promotion() {
         // For promotions: gain the captured piece + (promo_value - pawn_value)
         let captured_val = board
@@ -153,8 +151,47 @@ pub fn see(board: &Board, m: Move) -> i32 {
 }
 
 /// Returns true if the SEE of move `m` is >= `threshold`.
-/// Early-exit optimization for when we only need a yes/no answer.
+/// Uses early-exit checks to avoid full exchange computation when possible.
 pub fn see_ge(board: &Board, m: Move, threshold: i32) -> bool {
+    let from = m.from_sq();
+    let to = m.to_sq();
+
+    // Determine initial gain
+    let gain = if m.is_en_passant() {
+        see_piece_value(PieceType::Pawn)
+    } else if m.is_promotion() {
+        let captured_val = board
+            .piece_on(to)
+            .map_or(0, |p| see_piece_value(p.piece_type));
+        captured_val + see_piece_value(m.promotion_piece()) - see_piece_value(PieceType::Pawn)
+    } else {
+        board
+            .piece_on(to)
+            .map_or(0, |p| see_piece_value(p.piece_type))
+    };
+
+    // Quick check 1: best case (capture, opponent doesn't recapture)
+    // If even that doesn't reach threshold, definitely fails.
+    if gain < threshold {
+        return false;
+    }
+
+    let attacker_pt = if m.is_promotion() {
+        m.promotion_piece()
+    } else {
+        match board.piece_on(from) {
+            Some(p) => p.piece_type,
+            None => return false,
+        }
+    };
+
+    // Quick check 2: worst case (opponent recaptures our piece for free)
+    // If even that exceeds threshold, definitely succeeds.
+    if gain - see_piece_value(attacker_pt) >= threshold {
+        return true;
+    }
+
+    // Need full SEE computation for ambiguous cases
     see(board, m) >= threshold
 }
 

@@ -356,9 +356,7 @@ impl Board {
 
     /// Unmake a null move, restoring the board to its previous state.
     pub fn unmake_null_move(&mut self) {
-        if self.history_len == 0 {
-            return;
-        }
+        debug_assert!(self.history_len > 0, "unmake_null_move with empty history");
         self.history_len -= 1;
         let undo = self.history[self.history_len];
 

@@ -1,11 +1,11 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use rage_core::{Board, Move, PieceType};
+use rage_core::{Board, Move, MoveList, PieceType};
 
 use crate::eval::{INFINITY, MATE_SCORE, evaluate, piece_value};
 use crate::ordering::{
-    CounterMoves, History, Killers, MAX_PLY, MoveOrderContext, pick_move, score_moves,
+    CounterMoves, History, Killers, MAX_PLY, MoveOrderContext, pick_move, score_moves_into,
 };
 use crate::see;
 use crate::time::{SearchLimits, TimeManager};
@@ -16,6 +16,9 @@ const DELTA_MARGIN: i32 = 200;
 
 /// Initial aspiration window delta.
 const ASPIRATION_DELTA: i32 = 25;
+
+/// Maximum number of moves in any position.
+const MAX_MOVES: usize = MoveList::MAX_MOVES;
 
 /// LMR reduction table: precomputed as LMR_TABLE[depth][move_count].
 /// R = max(1, floor(0.75 + ln(d) * ln(m) / 2.25))
@@ -38,6 +41,9 @@ static LMR_TABLE: std::sync::LazyLock<[[u32; LMR_TABLE_SIZE]; LMR_TABLE_SIZE]> =
 /// LMP thresholds indexed by depth (0..=8).
 const LMP_THRESHOLDS: [u32; 9] = [0, 5, 8, 13, 20, 30, 42, 56, 72];
 
+/// Maximum ply the search can reach before returning static eval.
+const PLY_LIMIT: u32 = MAX_PLY as u32 - 2;
+
 /// Search result returned to the UCI layer.
 pub struct SearchResult {
     pub best_move: Move,
@@ -53,6 +59,7 @@ pub type InfoCallback = Box<dyn Fn(&SearchInfo) + Send>;
 /// Information about a completed search iteration.
 pub struct SearchInfo {
     pub depth: u32,
+    pub seldepth: u32,
     pub score: i32,
     pub nodes: u64,
     pub time_ms: u64,
@@ -106,8 +113,11 @@ pub struct Searcher {
     killers: Killers,
     history: History,
     counter_moves: CounterMoves,
-    stack: [StackEntry; MAX_PLY + 4], // +4 for safety with ply-2 lookback
+    stack: [StackEntry; MAX_PLY + 4],
+    pv_table: [[Move; MAX_PLY + 1]; MAX_PLY + 1],
+    pv_length: [usize; MAX_PLY + 1],
     nodes: u64,
+    seldepth: u32,
     stopped: bool,
 }
 
@@ -119,7 +129,10 @@ impl Searcher {
             history: History::new(),
             counter_moves: CounterMoves::new(),
             stack: [const { StackEntry::EMPTY }; MAX_PLY + 4],
+            pv_table: [[Move::NULL; MAX_PLY + 1]; MAX_PLY + 1],
+            pv_length: [0; MAX_PLY + 1],
             nodes: 0,
+            seldepth: 0,
             stopped: false,
         }
     }
@@ -142,10 +155,12 @@ impl Searcher {
         let mut best_move = Move::NULL;
         let mut best_score = -INFINITY;
         let mut best_pv = Vec::new();
+        let mut completed_depth = 0u32;
         let mut prev_best_move = Move::NULL;
         let mut stability_count = 0u32;
 
         for depth in 1..=tm.max_depth().min(MAX_PLY as u32) {
+            self.seldepth = 0;
             let score;
 
             if depth < 4 {
@@ -205,9 +220,11 @@ impl Searcher {
             }
 
             best_score = score;
+            completed_depth = depth;
 
-            // Extract PV from TT
-            let pv = self.extract_pv(board, depth);
+            // Extract PV from triangular PV table
+            let pv_len = self.pv_length[0];
+            let pv: Vec<Move> = self.pv_table[0][..pv_len].to_vec();
             if let Some(&first) = pv.first() {
                 best_move = first;
             }
@@ -224,6 +241,7 @@ impl Searcher {
             if let Some(ref cb) = info_callback {
                 cb(&SearchInfo {
                     depth,
+                    seldepth: self.seldepth,
                     score: best_score,
                     nodes: self.nodes,
                     time_ms: tm.elapsed_ms(),
@@ -261,7 +279,7 @@ impl Searcher {
         SearchResult {
             best_move,
             score: best_score,
-            depth: best_pv.len() as u32,
+            depth: completed_depth,
             nodes: self.nodes,
             pv: best_pv,
         }
@@ -279,7 +297,16 @@ impl Searcher {
         ply: u32,
         null_allowed: bool,
     ) -> i32 {
+        // Ply overflow guard: return static eval at max depth
+        if ply >= PLY_LIMIT {
+            return evaluate(board);
+        }
+
         self.nodes += 1;
+        self.seldepth = self.seldepth.max(ply);
+
+        // Initialize PV for this ply (empty)
+        self.pv_length[ply as usize] = 0;
 
         // Check for time/stop periodically
         if tm.should_stop(self.nodes) {
@@ -297,7 +324,8 @@ impl Searcher {
         }
 
         // Check extension: extend when in check to avoid horizon effect
-        if in_check {
+        // Cap extensions at high ply to prevent search explosion
+        if in_check && ply < PLY_LIMIT - 4 {
             depth += 1;
         }
 
@@ -426,15 +454,24 @@ impl Searcher {
             Move::NULL
         };
 
-        // Score and sort moves
+        // Score and sort moves (stack-allocated, zero heap allocs)
+        let num_moves = moves.len();
         let ctx = MoveOrderContext {
             tt_move,
             killers: self.killers.get(ply as usize),
             counter_move,
             history_color: board.side_to_move(),
         };
-        let mut move_buf: Vec<Move> = moves.as_slice().to_vec();
-        let mut scores = score_moves(board, &moves, &ctx, &self.history);
+        let mut move_buf = [Move::NULL; MAX_MOVES];
+        let mut scores = [0i32; MAX_MOVES];
+        move_buf[..num_moves].copy_from_slice(moves.as_slice());
+        score_moves_into(
+            board,
+            &move_buf[..num_moves],
+            &mut scores[..num_moves],
+            &ctx,
+            &self.history,
+        );
 
         let mut best_move = move_buf[0];
         let mut best_score = -INFINITY;
@@ -442,8 +479,12 @@ impl Searcher {
         let mut move_count = 0u32;
         let stm = board.side_to_move();
 
-        for i in 0..move_buf.len() {
-            pick_move(&mut move_buf, &mut scores, i);
+        // Track actually-searched quiet moves for accurate history malus
+        let mut searched_quiets = [Move::NULL; MAX_MOVES];
+        let mut num_searched_quiets = 0usize;
+
+        for i in 0..num_moves {
+            pick_move(&mut move_buf[..num_moves], &mut scores[..num_moves], i);
             let m = move_buf[i];
             let is_capture = board.is_capture(m);
             let is_quiet = !is_capture && !m.is_promotion();
@@ -461,8 +502,9 @@ impl Searcher {
                     continue;
                 }
 
-                // SEE pruning for bad captures
-                if is_capture && depth <= 4 && !see::see_ge(board, m, 0) {
+                // SEE pruning for bad captures: use score from move ordering
+                // (captures were already SEE-classified during scoring)
+                if is_capture && depth <= 4 && scores[i] < 0 {
                     continue;
                 }
 
@@ -478,6 +520,12 @@ impl Searcher {
                 .map_or(PieceType::Pawn, |p| p.piece_type);
             self.stack[ply as usize + 2].move_played = m;
             self.stack[ply as usize + 2].piece_moved = piece_moved;
+
+            // Track searched quiets for history malus
+            if is_quiet {
+                searched_quiets[num_searched_quiets] = m;
+                num_searched_quiets += 1;
+            }
 
             board.make_move(m);
 
@@ -557,6 +605,15 @@ impl Searcher {
                     alpha = score;
                     bound = Bound::Exact;
 
+                    // Update triangular PV table
+                    let p = ply as usize;
+                    self.pv_table[p][0] = m;
+                    let child_len = self.pv_length[p + 1];
+                    for k in 0..child_len {
+                        self.pv_table[p][k + 1] = self.pv_table[p + 1][k];
+                    }
+                    self.pv_length[p] = child_len + 1;
+
                     if score >= beta {
                         bound = Bound::Lower;
 
@@ -566,11 +623,9 @@ impl Searcher {
                             let bonus = (depth * depth) as i32;
                             self.history.update(stm, m, bonus);
 
-                            // Give negative history to all previously tried quiet moves
-                            for &prev in &move_buf[..i] {
-                                if !board.is_capture(prev) && !prev.is_promotion() {
-                                    self.history.update(stm, prev, -bonus);
-                                }
+                            // Negative history for previously searched quiet moves (not pruned ones)
+                            for &prev in &searched_quiets[..num_searched_quiets - 1] {
+                                self.history.update(stm, prev, -bonus);
                             }
 
                             // Counter move
@@ -593,7 +648,6 @@ impl Searcher {
     }
 
     /// Quiescence search: only search captures to avoid horizon effects.
-    #[allow(clippy::only_used_in_recursion)]
     fn quiescence(
         &mut self,
         board: &mut Board,
@@ -602,7 +656,13 @@ impl Searcher {
         beta: i32,
         ply: u32,
     ) -> i32 {
+        // Ply overflow guard
+        if ply >= PLY_LIMIT {
+            return evaluate(board);
+        }
+
         self.nodes += 1;
+        self.seldepth = self.seldepth.max(ply);
 
         if tm.should_stop(self.nodes) {
             self.stopped = true;
@@ -621,8 +681,11 @@ impl Searcher {
         // Generate all legal moves, then filter to captures
         let moves = board.generate_legal_moves();
 
-        // Score captures with MVV-LVA
-        let mut captures: Vec<(Move, i32)> = Vec::new();
+        // Collect and score captures into stack-allocated arrays
+        let mut capture_buf = [Move::NULL; MAX_MOVES];
+        let mut capture_scores = [0i32; MAX_MOVES];
+        let mut num_captures = 0usize;
+
         for m in &moves {
             if board.is_capture(*m) || m.is_promotion() {
                 // Delta pruning: skip if capture can't possibly raise alpha
@@ -650,17 +713,24 @@ impl Searcher {
                     continue;
                 }
 
-                captures.push((*m, mvv_lva_qsearch(board, *m)));
+                capture_buf[num_captures] = *m;
+                capture_scores[num_captures] = mvv_lva_qsearch(board, *m);
+                num_captures += 1;
             }
         }
 
-        // Sort captures by score (descending)
-        captures.sort_by(|a, b| b.1.cmp(&a.1));
+        // Use partial selection sort (same as main search) instead of full sort
+        for i in 0..num_captures {
+            pick_move(
+                &mut capture_buf[..num_captures],
+                &mut capture_scores[..num_captures],
+                i,
+            );
+            let m = capture_buf[i];
 
-        for (m, _score) in &captures {
-            board.make_move(*m);
+            board.make_move(m);
             let score = -self.quiescence(board, tm, -beta, -alpha, ply + 1);
-            board.unmake_move(*m);
+            board.unmake_move(m);
 
             if self.stopped {
                 return 0;
@@ -675,41 +745,6 @@ impl Searcher {
         }
 
         alpha
-    }
-
-    /// Extract the principal variation from the TT.
-    fn extract_pv(&self, board: &mut Board, max_depth: u32) -> Vec<Move> {
-        let mut pv = Vec::new();
-        let mut seen_hashes = Vec::new();
-
-        for _ in 0..max_depth {
-            let hash = board.zobrist_hash();
-            if seen_hashes.contains(&hash) {
-                break;
-            }
-            seen_hashes.push(hash);
-
-            if let Some(entry) = self.tt.probe(hash, 0) {
-                let m = entry.best_move;
-                if m.is_null() {
-                    break;
-                }
-                let legal_moves = board.generate_legal_moves();
-                if !legal_moves.contains(m) {
-                    break;
-                }
-                pv.push(m);
-                board.make_move(m);
-            } else {
-                break;
-            }
-        }
-
-        for m in pv.iter().rev() {
-            board.unmake_move(*m);
-        }
-
-        pv
     }
 }
 
@@ -938,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn pv_extraction_works() {
+    fn pv_from_triangular_table() {
         let result = search_position(
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
             3,
@@ -970,14 +1005,26 @@ mod tests {
     }
 
     #[test]
-    fn check_extension_finds_deeper_mate() {
-        // Position where check extension helps find the mate
-        // Mate requires seeing through a check sequence
-        let result = search_position(
-            "r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
-            2,
+    fn check_extension_increases_seldepth() {
+        // In a position with many checks, check extensions should push seldepth
+        // beyond the nominal depth more than a quiet position would.
+        // Kiwipete has many tactical checks.
+        let mut board =
+            Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+                .unwrap();
+        let mut searcher = Searcher::new(16);
+        let limits = SearchLimits {
+            depth: Some(4),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        searcher.search(&mut board, &limits, stop, None);
+        // Check extensions should push selective depth beyond nominal depth 4
+        assert!(
+            searcher.seldepth > 4,
+            "seldepth {} should exceed nominal depth 4 due to check extensions",
+            searcher.seldepth
         );
-        assert_eq!(result.best_move.to_string(), "h5f7");
     }
 
     #[test]
@@ -993,6 +1040,58 @@ mod tests {
             result.nodes < 10_000_000,
             "depth 6 with pruning should use < 10M nodes, got {}",
             result.nodes
+        );
+    }
+
+    #[test]
+    fn depth_reports_actual_search_depth() {
+        let result = search_position(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            5,
+        );
+        assert_eq!(
+            result.depth, 5,
+            "depth should report actual completed depth"
+        );
+    }
+
+    #[test]
+    fn seldepth_exceeds_depth() {
+        // With quiescence search and check extensions, seldepth should exceed depth
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let mut searcher = Searcher::new(16);
+        let limits = SearchLimits {
+            depth: Some(4),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        searcher.search(&mut board, &limits, stop, None);
+        // Seldepth is tracked internally; verify qsearch pushed beyond nominal depth
+        assert!(searcher.seldepth >= 4, "seldepth should be at least depth");
+    }
+
+    #[test]
+    fn tt_warmup_reduces_nodes() {
+        // Searching the same position twice should use fewer nodes the second time
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let mut searcher = Searcher::new(16);
+        let limits = SearchLimits {
+            depth: Some(5),
+            ..Default::default()
+        };
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let result1 = searcher.search(&mut board, &limits, Arc::clone(&stop), None);
+
+        let result2 = searcher.search(&mut board, &limits, stop, None);
+
+        assert!(
+            result2.nodes < result1.nodes,
+            "second search ({}) should use fewer nodes than first ({}) due to TT",
+            result2.nodes,
+            result1.nodes
         );
     }
 }

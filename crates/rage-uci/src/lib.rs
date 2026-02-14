@@ -224,8 +224,9 @@ impl UciEngine {
                     .join(" ");
 
                 println!(
-                    "info depth {} score {} nodes {} nps {} time {} hashfull {} pv {}",
+                    "info depth {} seldepth {} score {} nodes {} nps {} time {} hashfull {} pv {}",
                     info.depth,
+                    info.seldepth,
                     info.score_string(),
                     info.nodes,
                     info.nps(),
