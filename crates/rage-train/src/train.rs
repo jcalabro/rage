@@ -53,7 +53,7 @@ pub fn compute_loss<B: AutodiffBackend>(
     lambda: f64,
 ) -> Tensor<B, 1> {
     let device = predictions.device();
-    let scale = Tensor::from_floats([SIGMOID_SCALE as f32], &device);
+    let scale = Tensor::from_floats([[SIGMOID_SCALE as f32]], &device);
 
     // Sigmoid of predictions and targets (score component)
     let pred_sigmoid = activation_sigmoid(predictions.clone() * scale.clone());
@@ -65,7 +65,7 @@ pub fn compute_loss<B: AutodiffBackend>(
 
     // WDL cross-entropy: pred_wdl = sigmoid(prediction), actual = target_wdl
     let pred_wdl = activation_sigmoid(predictions);
-    let epsilon = Tensor::from_floats([1e-7f32], &device);
+    let epsilon = Tensor::from_floats([[1e-7f32]], &device);
     let one = Tensor::ones_like(&pred_wdl);
 
     let ce_loss = -(target_wdl.clone() * (pred_wdl.clone() + epsilon.clone()).log()
