@@ -1,13 +1,23 @@
-use rage_core::{Board, Move, MoveList, PieceType};
+use rage_core::{Board, Color, Move, MoveList, PieceType, Square};
 
 use crate::eval::piece_value;
+use crate::see;
 
-/// MVV-LVA score for a capture: prefer capturing high-value pieces with low-value attackers.
-/// Returns a score suitable for ordering (higher = better).
+/// Score tiers for move ordering (higher = searched first).
+const TT_MOVE_SCORE: i32 = 100_000;
+const GOOD_CAPTURE_BASE: i32 = 30_000;
+const KILLER1_SCORE: i32 = 20_000;
+const KILLER2_SCORE: i32 = 19_000;
+const COUNTER_MOVE_SCORE: i32 = 18_000;
+const BAD_CAPTURE_BASE: i32 = -10_000;
+
+/// Maximum search ply for history/killer arrays.
+pub const MAX_PLY: usize = 128;
+
+/// MVV-LVA score for a capture (range ~0..9000).
 fn mvv_lva_score(board: &Board, m: Move) -> i32 {
     let to = m.to_sq();
 
-    // For en passant, victim is always a pawn
     let victim_value = if m.is_en_passant() {
         piece_value(PieceType::Pawn)
     } else {
@@ -23,33 +33,157 @@ fn mvv_lva_score(board: &Board, m: Move) -> i32 {
         None => 0,
     };
 
-    // Higher victim value is much more important; subtract a fraction of attacker value
     victim_value * 10 - attacker_value
 }
 
-/// Score a move for ordering purposes.
-/// TT move gets highest priority, captures scored by MVV-LVA, quiets get 0.
-pub fn score_move(board: &Board, m: Move, tt_move: Move) -> i32 {
-    if m == tt_move {
-        return 100_000;
+/// Killer move table: 2 killer moves per ply.
+pub struct Killers {
+    table: [[Move; 2]; MAX_PLY],
+}
+
+impl Default for Killers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Killers {
+    pub fn new() -> Self {
+        Self {
+            table: [[Move::NULL; 2]; MAX_PLY],
+        }
     }
 
-    if board.is_capture(m) {
-        // MVV-LVA scores are in range ~(0..9000), shift up to be above quiets
-        return 10_000 + mvv_lva_score(board, m);
+    pub fn get(&self, ply: usize) -> [Move; 2] {
+        self.table[ply]
     }
 
-    // Promotions get a bonus
-    if m.is_promotion() {
-        return 9_000 + piece_value(m.promotion_piece());
+    /// Record a killer move. Shifts killer[0] to killer[1] and stores new move as killer[0].
+    pub fn store(&mut self, ply: usize, m: Move) {
+        if m == self.table[ply][0] {
+            return; // Already the primary killer
+        }
+        self.table[ply][1] = self.table[ply][0];
+        self.table[ply][0] = m;
     }
 
-    0
+    pub fn clear(&mut self) {
+        self.table = [[Move::NULL; 2]; MAX_PLY];
+    }
+}
+
+/// History heuristic table: indexed by [color][from_sq][to_sq].
+pub struct History {
+    table: [[[i32; Square::NUM]; Square::NUM]; Color::NUM],
+}
+
+/// Maximum absolute value for history scores (prevents overflow).
+const HISTORY_MAX: i32 = 16384;
+
+impl Default for History {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl History {
+    pub fn new() -> Self {
+        Self {
+            table: [[[0; Square::NUM]; Square::NUM]; Color::NUM],
+        }
+    }
+
+    pub fn get(&self, color: Color, m: Move) -> i32 {
+        self.table[color.index()][m.from_sq().index()][m.to_sq().index()]
+    }
+
+    /// Update history with gravity: bonus decays existing values toward zero.
+    pub fn update(&mut self, color: Color, m: Move, bonus: i32) {
+        let entry = &mut self.table[color.index()][m.from_sq().index()][m.to_sq().index()];
+        // Gravity formula: prevents unbounded growth
+        *entry += bonus - *entry * bonus.abs() / HISTORY_MAX;
+        *entry = (*entry).clamp(-HISTORY_MAX, HISTORY_MAX);
+    }
+
+    pub fn clear(&mut self) {
+        self.table = [[[0; Square::NUM]; Square::NUM]; Color::NUM];
+    }
+}
+
+/// Counter move table: indexed by [piece_type][to_sq] of the previous move.
+pub struct CounterMoves {
+    table: [[Move; Square::NUM]; PieceType::NUM],
+}
+
+impl Default for CounterMoves {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CounterMoves {
+    pub fn new() -> Self {
+        Self {
+            table: [[Move::NULL; Square::NUM]; PieceType::NUM],
+        }
+    }
+
+    pub fn get(&self, prev_piece: PieceType, prev_to: Square) -> Move {
+        self.table[prev_piece.index()][prev_to.index()]
+    }
+
+    pub fn store(&mut self, prev_piece: PieceType, prev_to: Square, m: Move) {
+        self.table[prev_piece.index()][prev_to.index()] = m;
+    }
+
+    pub fn clear(&mut self) {
+        self.table = [[Move::NULL; Square::NUM]; PieceType::NUM];
+    }
+}
+
+/// Context for scoring moves at a given ply.
+pub struct MoveOrderContext {
+    pub tt_move: Move,
+    pub killers: [Move; 2],
+    pub counter_move: Move,
+    pub history_color: Color,
+}
+
+/// Score a single move for ordering.
+pub fn score_move(board: &Board, m: Move, ctx: &MoveOrderContext, history: &History) -> i32 {
+    if m == ctx.tt_move {
+        return TT_MOVE_SCORE;
+    }
+
+    if board.is_capture(m) || m.is_promotion() {
+        if m.is_promotion() && !board.is_capture(m) {
+            // Non-capture promotion
+            return GOOD_CAPTURE_BASE + piece_value(m.promotion_piece());
+        }
+        // Use SEE to classify captures as good or bad
+        let see_val = see::see(board, m);
+        if see_val >= 0 {
+            return GOOD_CAPTURE_BASE + mvv_lva_score(board, m);
+        }
+        return BAD_CAPTURE_BASE + mvv_lva_score(board, m);
+    }
+
+    // Quiet moves
+    if m == ctx.killers[0] {
+        return KILLER1_SCORE;
+    }
+    if m == ctx.killers[1] {
+        return KILLER2_SCORE;
+    }
+    if m == ctx.counter_move {
+        return COUNTER_MOVE_SCORE;
+    }
+
+    // History score for remaining quiets
+    history.get(ctx.history_color, m)
 }
 
 /// Pick the best-scored move from `start_idx..moves.len()`, swap it to `start_idx`.
-/// This is a partial selection sort - we only sort one element per call.
-/// Returns the scores slice for the caller to use.
 pub fn pick_move(moves: &mut [Move], scores: &mut [i32], start_idx: usize) {
     let mut best_idx = start_idx;
     let mut best_score = scores[start_idx];
@@ -67,11 +201,16 @@ pub fn pick_move(moves: &mut [Move], scores: &mut [i32], start_idx: usize) {
     }
 }
 
-/// Score all moves in a move list. Returns a Vec of scores parallel to the move list.
-pub fn score_moves(board: &Board, moves: &MoveList, tt_move: Move) -> Vec<i32> {
+/// Score all moves in a move list.
+pub fn score_moves(
+    board: &Board,
+    moves: &MoveList,
+    ctx: &MoveOrderContext,
+    history: &History,
+) -> Vec<i32> {
     let mut scores = Vec::with_capacity(moves.len());
     for m in moves {
-        scores.push(score_move(board, *m, tt_move));
+        scores.push(score_move(board, *m, ctx, history));
     }
     scores
 }
@@ -82,28 +221,38 @@ mod tests {
     use super::*;
     use rage_core::Board;
 
+    fn default_ctx(tt_move: Move) -> MoveOrderContext {
+        MoveOrderContext {
+            tt_move,
+            killers: [Move::NULL; 2],
+            counter_move: Move::NULL,
+            history_color: Color::White,
+        }
+    }
+
     #[test]
     fn tt_move_highest_priority() {
         let board = Board::starting_position();
+        let history = History::new();
         let tt_move = Move::new(rage_core::Square::E2, rage_core::Square::E4);
         let other_move = Move::new(rage_core::Square::D2, rage_core::Square::D4);
-        let tt_score = score_move(&board, tt_move, tt_move);
-        let other_score = score_move(&board, other_move, tt_move);
+        let ctx = default_ctx(tt_move);
+        let tt_score = score_move(&board, tt_move, &ctx, &history);
+        let other_score = score_move(&board, other_move, &ctx, &history);
         assert!(tt_score > other_score, "TT move should have highest score");
     }
 
     #[test]
     fn captures_above_quiets() {
-        // Position where d4 pawn can capture e5 pawn
         let board =
             Board::from_fen("rnbqkbnr/pppp1ppp/8/4p3/3P4/8/PPP1PPPP/RNBQKBNR w KQkq e6 0 2")
                 .unwrap();
+        let history = History::new();
         let capture = Move::new(rage_core::Square::D4, rage_core::Square::E5);
         let quiet = Move::new(rage_core::Square::E2, rage_core::Square::E3);
-        let null = Move::NULL;
-
-        let cap_score = score_move(&board, capture, null);
-        let quiet_score = score_move(&board, quiet, null);
+        let ctx = default_ctx(Move::NULL);
+        let cap_score = score_move(&board, capture, &ctx, &history);
+        let quiet_score = score_move(&board, quiet, &ctx, &history);
         assert!(
             cap_score > quiet_score,
             "capture ({cap_score}) should score above quiet ({quiet_score})"
@@ -111,16 +260,51 @@ mod tests {
     }
 
     #[test]
-    fn mvv_lva_queen_capture_beats_pawn_capture() {
-        // Position with various captures available
-        let board = Board::from_fen("rnbqkb1r/pppppppp/5n2/4N3/8/8/PPPPPPPP/RNBQKB1R w KQkq - 2 2")
-            .unwrap();
-        // Knight captures knight on f6 (victim=320, attacker=320)
-        let capture_knight = Move::new(rage_core::Square::E5, rage_core::Square::F6);
-        // This is a fictional scenario for ordering - test the scoring function
-        let score = mvv_lva_score(&board, capture_knight);
-        // victim_value * 10 - attacker_value = 320*10 - 320 = 2880
-        assert_eq!(score, 2880);
+    fn killer_above_normal_quiet() {
+        let board = Board::starting_position();
+        let history = History::new();
+        let killer = Move::new(rage_core::Square::E2, rage_core::Square::E4);
+        let quiet = Move::new(rage_core::Square::D2, rage_core::Square::D4);
+        let ctx = MoveOrderContext {
+            tt_move: Move::NULL,
+            killers: [killer, Move::NULL],
+            counter_move: Move::NULL,
+            history_color: Color::White,
+        };
+        let killer_score = score_move(&board, killer, &ctx, &history);
+        let quiet_score = score_move(&board, quiet, &ctx, &history);
+        assert!(
+            killer_score > quiet_score,
+            "killer ({killer_score}) should score above quiet ({quiet_score})"
+        );
+    }
+
+    #[test]
+    fn history_affects_quiet_ordering() {
+        let board = Board::starting_position();
+        let mut history = History::new();
+        let m1 = Move::new(rage_core::Square::E2, rage_core::Square::E4);
+        let m2 = Move::new(rage_core::Square::D2, rage_core::Square::D4);
+        history.update(Color::White, m1, 500);
+        let ctx = default_ctx(Move::NULL);
+        let s1 = score_move(&board, m1, &ctx, &history);
+        let s2 = score_move(&board, m2, &ctx, &history);
+        assert!(
+            s1 > s2,
+            "move with history ({s1}) should score above ({s2})"
+        );
+    }
+
+    #[test]
+    fn killers_store_and_shift() {
+        let mut killers = Killers::new();
+        let m1 = Move::new(rage_core::Square::E2, rage_core::Square::E4);
+        let m2 = Move::new(rage_core::Square::D2, rage_core::Square::D4);
+        killers.store(0, m1);
+        assert_eq!(killers.get(0)[0], m1);
+        killers.store(0, m2);
+        assert_eq!(killers.get(0)[0], m2);
+        assert_eq!(killers.get(0)[1], m1);
     }
 
     #[test]
@@ -133,7 +317,7 @@ mod tests {
         let mut scores = [10, 50, 30];
 
         pick_move(&mut moves, &mut scores, 0);
-        assert_eq!(moves[0], m2); // m2 had highest score (50)
+        assert_eq!(moves[0], m2);
         assert_eq!(scores[0], 50);
     }
 }

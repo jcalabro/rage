@@ -116,6 +116,15 @@ impl TimeManager {
         self.elapsed_ms() >= self.soft_limit_ms
     }
 
+    /// Returns true if the given percentage of the soft limit has been reached.
+    /// `pct` is 0-100. Used for best-move stability: stable moves use less time.
+    pub fn soft_limit_reached_fraction(&self, pct: u64) -> bool {
+        if self.soft_limit_ms == u64::MAX {
+            return false;
+        }
+        self.elapsed_ms() >= self.soft_limit_ms * pct / 100
+    }
+
     /// Maximum search depth.
     pub fn max_depth(&self) -> u32 {
         self.max_depth

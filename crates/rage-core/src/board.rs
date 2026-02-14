@@ -323,6 +323,65 @@ impl Board {
         self.fullmove_number = num;
     }
 
+    // --- Null Move ---
+
+    /// Make a null move (pass the turn without moving a piece).
+    /// Used by search for null move pruning. The position must not be in check.
+    pub fn make_null_move(&mut self) {
+        debug_assert!(self.history_len < MAX_HISTORY);
+        self.history[self.history_len] = UndoInfo {
+            captured_piece: None,
+            castling: self.castling,
+            en_passant: self.en_passant,
+            halfmove_clock: self.halfmove_clock,
+            zobrist: self.zobrist,
+        };
+        self.history_len += 1;
+
+        // Remove old en passant from hash
+        self.zobrist ^= zobrist::ep_key(self.en_passant.map(|sq| sq.file()));
+        self.en_passant = None;
+        self.zobrist ^= zobrist::ep_key(None);
+
+        self.halfmove_clock += 1;
+
+        // Flip side to move
+        self.side_to_move = !self.side_to_move;
+        self.zobrist ^= zobrist::side_key();
+
+        if self.side_to_move == Color::White {
+            self.fullmove_number += 1;
+        }
+    }
+
+    /// Unmake a null move, restoring the board to its previous state.
+    pub fn unmake_null_move(&mut self) {
+        if self.history_len == 0 {
+            return;
+        }
+        self.history_len -= 1;
+        let undo = self.history[self.history_len];
+
+        self.side_to_move = !self.side_to_move;
+        if self.side_to_move == Color::Black {
+            self.fullmove_number -= 1;
+        }
+
+        self.en_passant = undo.en_passant;
+        self.halfmove_clock = undo.halfmove_clock;
+        self.zobrist = undo.zobrist;
+    }
+
+    /// Returns true if the side to move has any non-pawn, non-king material.
+    /// Used by search for null move pruning eligibility.
+    pub fn has_non_pawn_material(&self, color: Color) -> bool {
+        let non_pk = self.pieces(color, PieceType::Knight)
+            | self.pieces(color, PieceType::Bishop)
+            | self.pieces(color, PieceType::Rook)
+            | self.pieces(color, PieceType::Queen);
+        non_pk.is_not_empty()
+    }
+
     // --- Make / Unmake ---
 
     /// Make a move on the board. The move must be legal.
@@ -1091,5 +1150,73 @@ mod tests {
             Some(Square::E3),
             "EP should be set when enemy pawn can capture"
         );
+    }
+
+    #[test]
+    fn null_move_flips_side() {
+        let mut board = Board::starting_position();
+        assert_eq!(board.side_to_move(), Color::White);
+        board.make_null_move();
+        assert_eq!(board.side_to_move(), Color::Black);
+        board.unmake_null_move();
+        assert_eq!(board.side_to_move(), Color::White);
+    }
+
+    #[test]
+    fn null_move_zobrist_consistency() {
+        let mut board = Board::starting_position();
+        let original_hash = board.zobrist_hash();
+        board.make_null_move();
+        // Hash should differ after null move
+        assert_ne!(board.zobrist_hash(), original_hash);
+        // Incremental hash should match full recomputation
+        assert_eq!(board.zobrist_hash(), board.compute_zobrist());
+        board.unmake_null_move();
+        // Hash should be restored
+        assert_eq!(board.zobrist_hash(), original_hash);
+    }
+
+    #[test]
+    fn null_move_clears_en_passant() {
+        let mut board =
+            Board::from_fen("rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3")
+                .unwrap();
+        assert!(board.en_passant_square().is_some());
+        board.make_null_move();
+        assert_eq!(board.en_passant_square(), None);
+        assert_eq!(board.zobrist_hash(), board.compute_zobrist());
+        board.unmake_null_move();
+        assert!(board.en_passant_square().is_some());
+    }
+
+    #[test]
+    fn null_move_preserves_pieces() {
+        let mut board = Board::starting_position();
+        let occ_before = board.occupied().popcount();
+        board.make_null_move();
+        assert_eq!(board.occupied().popcount(), occ_before);
+        board.unmake_null_move();
+        assert_eq!(board.occupied().popcount(), occ_before);
+    }
+
+    #[test]
+    fn has_non_pawn_material_starting() {
+        let board = Board::starting_position();
+        assert!(board.has_non_pawn_material(Color::White));
+        assert!(board.has_non_pawn_material(Color::Black));
+    }
+
+    #[test]
+    fn has_non_pawn_material_k_vs_k() {
+        let board = Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(!board.has_non_pawn_material(Color::White));
+        assert!(!board.has_non_pawn_material(Color::Black));
+    }
+
+    #[test]
+    fn has_non_pawn_material_kp_vs_kp() {
+        let board = Board::from_fen("4k3/4p3/8/8/8/8/4P3/4K3 w - - 0 1").unwrap();
+        assert!(!board.has_non_pawn_material(Color::White));
+        assert!(!board.has_non_pawn_material(Color::Black));
     }
 }

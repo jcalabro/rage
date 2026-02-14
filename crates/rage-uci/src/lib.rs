@@ -593,9 +593,8 @@ mod tests {
     fn position_with_castling_moves() {
         let mut engine = UciEngine::new();
         // Play to a position where castling has occurred
-        engine.handle_command(
-            "position startpos moves e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 d2d3 f8e7 e1g1",
-        );
+        engine
+            .handle_command("position startpos moves e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 d2d3 f8e7 e1g1");
         // Verify white castled kingside: king on g1, rook on f1
         let fen = engine.board.to_fen();
         assert!(
@@ -608,9 +607,7 @@ mod tests {
     fn position_with_promotion() {
         let mut engine = UciEngine::new();
         // Position where white pawn promotes
-        engine.handle_command(
-            "position fen 8/P7/8/8/8/8/8/4K2k w - - 0 1 moves a7a8q",
-        );
+        engine.handle_command("position fen 8/P7/8/8/8/8/8/4K2k w - - 0 1 moves a7a8q");
         let fen = engine.board.to_fen();
         assert!(
             fen.starts_with("Q"),
@@ -671,9 +668,6 @@ mod tests {
         engine.handle_command("position startpos moves e2e4 zzzz");
         // Only e2e4 should have been applied
         let fen = engine.board.to_fen();
-        assert!(
-            fen.contains("4P3"),
-            "e2e4 should have been applied: {fen}"
-        );
+        assert!(fen.contains("4P3"), "e2e4 should have been applied: {fen}");
     }
 }
