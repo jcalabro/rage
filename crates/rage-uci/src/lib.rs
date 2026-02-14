@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 use rage_core::Board;
@@ -104,6 +104,9 @@ impl UciEngine {
             "d" | "display" => self.cmd_display(),
             "eval" => self.cmd_eval(),
             "perft" => self.cmd_perft(&mut tokens),
+            "compiler" => self.cmd_compiler(),
+            "help" => self.cmd_help(),
+            "license" => self.cmd_license(),
             _ => {} // Ignore unknown commands per UCI spec
         }
 
@@ -323,6 +326,65 @@ impl UciEngine {
         println!("Nodes: {nodes}");
         println!("Time: {}ms", elapsed.as_millis());
         println!("NPS: {nps}");
+    }
+
+    fn cmd_compiler(&self) {
+        println!("{ENGINE_NAME} v{}", env!("CARGO_PKG_VERSION"));
+        println!("Compiler: {}", env!("RUSTC_VERSION"));
+        println!(
+            "Profile: {}",
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        );
+        println!("Target: {}", env!("TARGET"));
+    }
+
+    fn cmd_help(&self) {
+        println!("{ENGINE_NAME} v{} by {ENGINE_AUTHOR}", env!("CARGO_PKG_VERSION"));
+        println!();
+        println!("UCI commands:");
+        println!("  uci            Show engine identity and options");
+        println!("  isready        Synchronize with engine");
+        println!("  ucinewgame     Reset engine state for a new game");
+        println!("  position       Set board position (startpos/fen + moves)");
+        println!("  go             Start searching (depth/movetime/wtime/btime/infinite/...)");
+        println!("  stop           Stop searching");
+        println!("  setoption      Set engine option (name <n> value <v>)");
+        println!("  quit           Exit the engine");
+        println!();
+        println!("Debug commands:");
+        println!("  d / display    Show the current board");
+        println!("  eval           Show static evaluation");
+        println!("  perft <depth>  Run perft node count");
+        println!("  compiler       Show compiler and build info");
+        println!("  help           Show this help");
+        println!("  license        Show license info");
+    }
+
+    fn cmd_license(&self) {
+        println!("{ENGINE_NAME} v{} by {ENGINE_AUTHOR}", env!("CARGO_PKG_VERSION"));
+        println!("MIT License, Copyright (c) 2026 Jim Calabro");
+        println!();
+        println!("Permission is hereby granted, free of charge, to any person obtaining a copy");
+        println!("of this software and associated documentation files (the \"Software\"), to deal");
+        println!("in the Software without restriction, including without limitation the rights");
+        println!("to use, copy, modify, merge, publish, distribute, sublicense, and/or sell");
+        println!("copies of the Software, and to permit persons to whom the Software is");
+        println!("furnished to do so, subject to the following conditions:");
+        println!();
+        println!("The above copyright notice and this permission notice shall be included in all");
+        println!("copies or substantial portions of the Software.");
+        println!();
+        println!("THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR");
+        println!("IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,");
+        println!("FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE");
+        println!("AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER");
+        println!("LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,");
+        println!("OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE");
+        println!("SOFTWARE.");
     }
 }
 
