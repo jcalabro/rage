@@ -6,7 +6,8 @@ use rage_nnue::{Accumulator, NnueNetwork};
 
 use crate::eval::{INFINITY, MATE_SCORE, evaluate_pst, piece_value};
 use crate::ordering::{
-    CounterMoves, History, Killers, MAX_PLY, MoveOrderContext, pick_move, score_moves_into,
+    ContHistEntry, ContinuationHistory, CounterMoves, History, Killers, MAX_PLY, MoveOrderContext,
+    pick_move, score_moves_into,
 };
 use crate::see;
 use crate::time::{SearchLimits, TimeManager};
@@ -116,6 +117,7 @@ pub struct Searcher {
     killers: Killers,
     history: History,
     counter_moves: CounterMoves,
+    cont_history: ContinuationHistory,
     stack: [StackEntry; MAX_PLY + 4],
     pv_table: [[Move; MAX_PLY + 1]; MAX_PLY + 1],
     pv_length: [usize; MAX_PLY + 1],
@@ -141,6 +143,7 @@ impl Searcher {
             killers: Killers::new(),
             history: History::new(),
             counter_moves: CounterMoves::new(),
+            cont_history: ContinuationHistory::new(),
             stack: [const { StackEntry::EMPTY }; MAX_PLY + 4],
             pv_table: [[Move::NULL; MAX_PLY + 1]; MAX_PLY + 1],
             pv_length: [0; MAX_PLY + 1],
@@ -153,12 +156,13 @@ impl Searcher {
         }
     }
 
-    /// Clear per-thread tables (killers, history, counter moves).
+    /// Clear per-thread tables (killers, history, counter moves, continuation history).
     /// Does NOT clear the TT (which is shared).
     pub fn clear_tables(&mut self) {
         self.killers.clear();
         self.history = History::new();
         self.counter_moves = CounterMoves::new();
+        self.cont_history.clear();
     }
 
     /// Get a reference to the current NNUE network (if any).
@@ -594,7 +598,7 @@ impl Searcher {
             };
         }
 
-        // Get previous move info for counter moves
+        // Get previous move info for counter moves and continuation history
         let prev_move = if ply >= 1 {
             self.stack[ply as usize + 1].move_played
         } else {
@@ -611,6 +615,13 @@ impl Searcher {
             Move::NULL
         };
 
+        // Copy continuation history entry to stack to avoid borrow conflicts
+        let cont_entry: Option<ContHistEntry> = if !prev_move.is_null() {
+            Some(*self.cont_history.get_entry(prev_piece, prev_move.to_sq()))
+        } else {
+            None
+        };
+
         // Score and sort moves (stack-allocated, zero heap allocs)
         let num_moves = moves.len();
         let ctx = MoveOrderContext {
@@ -618,6 +629,7 @@ impl Searcher {
             killers: self.killers.get(ply as usize),
             counter_move,
             history_color: board.side_to_move(),
+            cont_hist: cont_entry.as_ref(),
         };
         let mut move_buf = [Move::NULL; MAX_MOVES];
         let mut scores = [0i32; MAX_MOVES];
@@ -636,8 +648,9 @@ impl Searcher {
         let mut move_count = 0u32;
         let stm = board.side_to_move();
 
-        // Track actually-searched quiet moves for accurate history malus
+        // Track actually-searched quiet moves (and their piece types) for history malus
         let mut searched_quiets = [Move::NULL; MAX_MOVES];
+        let mut searched_quiet_pieces = [PieceType::Pawn; MAX_MOVES];
         let mut num_searched_quiets = 0usize;
 
         for i in 0..num_moves {
@@ -687,6 +700,7 @@ impl Searcher {
             // Track searched quiets for history malus
             if is_quiet {
                 searched_quiets[num_searched_quiets] = m;
+                searched_quiet_pieces[num_searched_quiets] = piece_moved;
                 num_searched_quiets += 1;
             }
 
@@ -756,11 +770,15 @@ impl Searcher {
                         reduction = reduction.saturating_sub(1);
                     }
 
-                    // Reduce based on history
+                    // Reduce based on combined butterfly + continuation history
                     let hist = self.history.get(stm, m);
-                    if hist > 0 {
+                    let ch_score = cont_entry
+                        .as_ref()
+                        .map_or(0, |ch| ch[piece_moved.index()][m.to_sq().index()]);
+                    let combined_hist = hist + ch_score;
+                    if combined_hist > 0 {
                         reduction = reduction.saturating_sub(1);
-                    } else if hist < -2000 {
+                    } else if combined_hist < -2000 {
                         reduction += 1;
                     }
 
@@ -824,14 +842,31 @@ impl Searcher {
                             let bonus = (depth * depth) as i32;
                             self.history.update(stm, m, bonus);
 
-                            // Negative history for previously searched quiet moves (not pruned ones)
-                            for &prev in &searched_quiets[..num_searched_quiets - 1] {
-                                self.history.update(stm, prev, -bonus);
+                            let has_prev = !prev_move.is_null();
+                            let prev_to = prev_move.to_sq();
+
+                            // Malus for previously searched quiet moves (not the cutoff move)
+                            for (&sq_move, &sq_piece) in searched_quiets
+                                [..num_searched_quiets - 1]
+                                .iter()
+                                .zip(&searched_quiet_pieces[..num_searched_quiets - 1])
+                            {
+                                self.history.update(stm, sq_move, -bonus);
+                                if has_prev {
+                                    self.cont_history.update(
+                                        prev_piece, prev_to, sq_piece,
+                                        sq_move.to_sq(), -bonus,
+                                    );
+                                }
                             }
 
-                            // Counter move
-                            if !prev_move.is_null() {
-                                self.counter_moves.store(prev_piece, prev_move.to_sq(), m);
+                            // Counter move and continuation history bonus
+                            if has_prev {
+                                self.counter_moves.store(prev_piece, prev_to, m);
+                                self.cont_history.update(
+                                    prev_piece, prev_to, piece_moved,
+                                    m.to_sq(), bonus,
+                                );
                             }
                         }
 
@@ -1311,5 +1346,67 @@ mod tests {
             result2.nodes,
             result1.nodes
         );
+    }
+
+    #[test]
+    fn cont_history_populated_during_search() {
+        // After a depth-6 search, cont_history should have non-zero entries.
+        // This verifies the update path in negamax is actually executing.
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
+        let limits = SearchLimits {
+            depth: Some(6),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        searcher.search(&mut board, &limits, stop, None);
+
+        // Sample several prev-move contexts; at least one should be non-zero
+        let mut found_nonzero = false;
+        'outer: for &piece in &PieceType::ALL {
+            for &sq in &rage_core::Square::ALL {
+                let entry = searcher.cont_history.get_entry(piece, sq);
+                for row in entry {
+                    for &val in row {
+                        if val != 0 {
+                            found_nonzero = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            found_nonzero,
+            "cont_history should have non-zero entries after depth-6 search"
+        );
+    }
+
+    #[test]
+    fn cont_history_cleared_on_clear_tables() {
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
+        let limits = SearchLimits {
+            depth: Some(5),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        searcher.search(&mut board, &limits, stop, None);
+
+        searcher.clear_tables();
+
+        // Every entry should be zero after clearing
+        for &piece in &PieceType::ALL {
+            for &sq in &rage_core::Square::ALL {
+                let entry = searcher.cont_history.get_entry(piece, sq);
+                for row in entry {
+                    for &val in row {
+                        assert_eq!(val, 0, "all entries should be zero after clear_tables");
+                    }
+                }
+            }
+        }
     }
 }
