@@ -32,6 +32,11 @@ pub fn run() {
         }
     });
 
+    println!(
+        "{ENGINE_NAME} v{} by {ENGINE_AUTHOR} (type 'help' for commands)",
+        env!("CARGO_PKG_VERSION")
+    );
+
     let mut engine = UciEngine::new();
 
     while let Ok(line) = rx.recv() {
@@ -102,6 +107,7 @@ impl UciEngine {
             }
             // Debug commands
             "d" | "display" => self.cmd_display(),
+            "dd" => self.cmd_display_pretty(),
             "eval" => self.cmd_eval(),
             "perft" => self.cmd_perft(&mut tokens),
             "compiler" => self.cmd_compiler(),
@@ -297,6 +303,55 @@ impl UciEngine {
         println!("Hash: {:016x}", self.board.zobrist_hash());
     }
 
+    fn cmd_display_pretty(&self) {
+        use rage_core::{Color, File, PieceType, Rank, Square};
+
+        const LIGHT_BG: &str = "\x1b[48;2;240;217;181m";
+        const DARK_BG: &str = "\x1b[48;2;181;136;99m";
+        const WHITE_FG: &str = "\x1b[38;2;255;255;255m";
+        const BLACK_FG: &str = "\x1b[38;2;0;0;0m";
+        const BOLD: &str = "\x1b[1m";
+        const RESET: &str = "\x1b[0m";
+
+        fn piece_char(pt: PieceType) -> char {
+            match pt {
+                PieceType::King => '\u{265A}',
+                PieceType::Queen => '\u{265B}',
+                PieceType::Rook => '\u{265C}',
+                PieceType::Bishop => '\u{265D}',
+                PieceType::Knight => '\u{265E}',
+                PieceType::Pawn => '\u{265F}',
+            }
+        }
+
+        println!("\n    a   b   c   d   e   f   g   h");
+        println!("  +---+---+---+---+---+---+---+---+");
+        for rank in (0..8).rev() {
+            print!("{} ", rank + 1);
+            for file in 0..8 {
+                let sq = Square::from_file_rank(File::new(file), Rank::new(rank));
+                let is_light = (file + rank) % 2 != 0;
+                let bg = if is_light { LIGHT_BG } else { DARK_BG };
+                match self.board.piece_on(sq) {
+                    Some(p) => {
+                        let fg = match p.color {
+                            Color::White => WHITE_FG,
+                            Color::Black => BLACK_FG,
+                        };
+                        print!("{bg}{BOLD}{fg} {c} {RESET}", c = piece_char(p.piece_type));
+                    }
+                    None => print!("{bg}   {RESET}"),
+                }
+                print!("\x1b[0m");
+            }
+            println!(" {}", rank + 1);
+            println!("  +---+---+---+---+---+---+---+---+");
+        }
+        println!("    a   b   c   d   e   f   g   h\n");
+        println!("FEN: {}", self.board.to_fen());
+        println!("Hash: {:016x}", self.board.zobrist_hash());
+    }
+
     fn cmd_eval(&self) {
         let score = rage_search::eval::evaluate(&self.board);
         println!(
@@ -343,7 +398,10 @@ impl UciEngine {
     }
 
     fn cmd_help(&self) {
-        println!("{ENGINE_NAME} v{} by {ENGINE_AUTHOR}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "{ENGINE_NAME} v{} by {ENGINE_AUTHOR}",
+            env!("CARGO_PKG_VERSION")
+        );
         println!();
         println!("UCI commands:");
         println!("  uci            Show engine identity and options");
@@ -357,6 +415,7 @@ impl UciEngine {
         println!();
         println!("Debug commands:");
         println!("  d / display    Show the current board");
+        println!("  dd             Show the board with emoji pieces and colored squares");
         println!("  eval           Show static evaluation");
         println!("  perft <depth>  Run perft node count");
         println!("  compiler       Show compiler and build info");
@@ -365,7 +424,10 @@ impl UciEngine {
     }
 
     fn cmd_license(&self) {
-        println!("{ENGINE_NAME} v{} by {ENGINE_AUTHOR}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "{ENGINE_NAME} v{} by {ENGINE_AUTHOR}",
+            env!("CARGO_PKG_VERSION")
+        );
         println!("MIT License, Copyright (c) 2026 Jim Calabro");
         println!();
         println!("Permission is hereby granted, free of charge, to any person obtaining a copy");

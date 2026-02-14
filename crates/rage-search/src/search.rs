@@ -1,9 +1,9 @@
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use rage_core::{Board, Move};
 
-use crate::eval::{evaluate, piece_value, INFINITY, MATE_SCORE};
+use crate::eval::{INFINITY, MATE_SCORE, evaluate, piece_value};
 use crate::ordering::{pick_move, score_moves};
 use crate::time::{SearchLimits, TimeManager};
 use crate::tt::{Bound, TranspositionTable};
@@ -301,10 +301,7 @@ impl Searcher {
                     continue; // Delta pruning
                 }
 
-                captures.push((
-                    *m,
-                    crate::ordering::score_move(board, *m, Move::NULL),
-                ));
+                captures.push((*m, crate::ordering::score_move(board, *m, Move::NULL)));
             }
         }
 
@@ -413,8 +410,7 @@ mod tests {
     #[test]
     fn white_up_material() {
         // White is up a full rook (black missing h8 rook), white to move
-        let result =
-            search_position("rnbqkbn1/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQq - 0 1", 3);
+        let result = search_position("rnbqkbn1/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQq - 0 1", 3);
         // White (STM) should be winning
         assert!(
             result.score > 400,
@@ -452,10 +448,7 @@ mod tests {
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
             3,
         );
-        assert!(
-            result.nodes > 0,
-            "should have searched at least some nodes"
-        );
+        assert!(result.nodes > 0, "should have searched at least some nodes");
     }
 
     #[test]

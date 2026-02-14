@@ -269,8 +269,7 @@ mod tests {
     fn white_up_queen() {
         // White has an extra queen
         let board =
-            Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-                .unwrap();
+            Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
         let score = evaluate(&board);
         assert!(score > 800, "should be winning for white, got {score}");
     }
@@ -278,10 +277,12 @@ mod tests {
     #[test]
     fn black_up_queen() {
         let board =
-            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR b KQkq - 0 1")
-                .unwrap();
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR b KQkq - 0 1").unwrap();
         let score = evaluate(&board);
-        assert!(score > 800, "should be winning for black (STM), got {score}");
+        assert!(
+            score > 800,
+            "should be winning for black (STM), got {score}"
+        );
     }
 
     #[test]
@@ -293,16 +294,17 @@ mod tests {
         let black_board = Board::from_fen(black_fen).unwrap();
         let w_score = evaluate(&white_board);
         let b_score = evaluate(&black_board);
-        assert_eq!(w_score, b_score, "mirrored positions should have equal eval");
+        assert_eq!(
+            w_score, b_score,
+            "mirrored positions should have equal eval"
+        );
     }
 
     #[test]
     fn endgame_king_centralization() {
         // King in center should be better in endgame
-        let center_king =
-            Board::from_fen("8/8/8/3K4/8/8/8/4k3 w - - 0 1").unwrap();
-        let corner_king =
-            Board::from_fen("K7/8/8/8/8/8/8/4k3 w - - 0 1").unwrap();
+        let center_king = Board::from_fen("8/8/8/3K4/8/8/8/4k3 w - - 0 1").unwrap();
+        let corner_king = Board::from_fen("K7/8/8/8/8/8/8/4k3 w - - 0 1").unwrap();
         let center_score = evaluate(&center_king);
         let corner_score = evaluate(&corner_king);
         assert!(

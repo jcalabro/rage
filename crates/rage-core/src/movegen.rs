@@ -808,8 +808,7 @@ mod tests {
     fn ep_discovered_check_is_illegal() {
         // Black king a4, white pawn d4 (just pushed), black pawn e4, white rook h4.
         // EP exd3 would remove both pawns from rank 4, exposing king to rook.
-        let mut board =
-            Board::from_fen("8/8/8/8/k2Pp2R/8/8/4K3 b - d3 0 1").unwrap();
+        let mut board = Board::from_fen("8/8/8/8/k2Pp2R/8/8/4K3 b - d3 0 1").unwrap();
         let moves = board.generate_legal_moves();
         assert!(
             !moves.iter().any(|m| m.is_en_passant()),
@@ -822,21 +821,22 @@ mod tests {
     #[test]
     fn queenside_castle_b1_attacked_is_legal() {
         // Black rook on b8 attacks b1 through the b-file.
-        let mut board =
-            Board::from_fen("1r2k3/8/8/8/8/8/8/R3K2R w KQ - 0 1").unwrap();
+        let mut board = Board::from_fen("1r2k3/8/8/8/8/8/8/R3K2R w KQ - 0 1").unwrap();
         let moves = board.generate_legal_moves();
-        let has_queenside = moves.iter().any(|m| {
-            m.is_castling() && m.to_sq() == Square::C1
-        });
-        assert!(has_queenside, "queenside castling should be legal when only b1 is attacked");
+        let has_queenside = moves
+            .iter()
+            .any(|m| m.is_castling() && m.to_sq() == Square::C1);
+        assert!(
+            has_queenside,
+            "queenside castling should be legal when only b1 is attacked"
+        );
     }
 
     // Can't castle when the king is in check.
     #[test]
     fn no_castling_when_in_check() {
         // White king on e1 in check from black rook on e8.
-        let mut board =
-            Board::from_fen("4r3/8/8/8/8/8/8/R3K2R w KQ - 0 1").unwrap();
+        let mut board = Board::from_fen("4r3/8/8/8/8/8/8/R3K2R w KQ - 0 1").unwrap();
         assert!(board.in_check());
         let moves = board.generate_legal_moves();
         assert!(
@@ -849,17 +849,19 @@ mod tests {
     #[test]
     fn no_castling_through_attacked_square() {
         // Black rook on f4 attacks f1 along the f-file.
-        let mut board =
-            Board::from_fen("4k3/8/8/8/5r2/8/8/R3K2R w KQ - 0 1").unwrap();
+        let mut board = Board::from_fen("4k3/8/8/8/5r2/8/8/R3K2R w KQ - 0 1").unwrap();
         let moves = board.generate_legal_moves();
-        let has_kingside = moves.iter().any(|m| {
-            m.is_castling() && m.to_sq() == Square::G1
-        });
-        assert!(!has_kingside, "kingside castling should be illegal when f1 is attacked");
+        let has_kingside = moves
+            .iter()
+            .any(|m| m.is_castling() && m.to_sq() == Square::G1);
+        assert!(
+            !has_kingside,
+            "kingside castling should be illegal when f1 is attacked"
+        );
         // But queenside should still be legal (d1, c1 not attacked by the f-rook).
-        let has_queenside = moves.iter().any(|m| {
-            m.is_castling() && m.to_sq() == Square::C1
-        });
+        let has_queenside = moves
+            .iter()
+            .any(|m| m.is_castling() && m.to_sq() == Square::C1);
         assert!(has_queenside, "queenside castling should still be legal");
     }
 
@@ -868,15 +870,18 @@ mod tests {
     fn rook_capture_removes_castling_rights() {
         // White rook captures black rook on a8. Should remove black queenside
         // AND white queenside (white rook left a1).
-        let mut board =
-            Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").unwrap();
+        let mut board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").unwrap();
         let rxa8 = Move::new(Square::A1, Square::A8);
         board.make_move(rxa8);
         let rights = board.castling_rights();
-        assert!(!rights.can_castle_queenside(crate::types::Color::White),
-            "white should lose queenside rights after moving rook from a1");
-        assert!(!rights.can_castle_queenside(crate::types::Color::Black),
-            "black should lose queenside rights after rook on a8 is captured");
+        assert!(
+            !rights.can_castle_queenside(crate::types::Color::White),
+            "white should lose queenside rights after moving rook from a1"
+        );
+        assert!(
+            !rights.can_castle_queenside(crate::types::Color::Black),
+            "black should lose queenside rights after rook on a8 is captured"
+        );
         assert!(rights.can_castle_kingside(crate::types::Color::White));
         assert!(rights.can_castle_kingside(crate::types::Color::Black));
     }
@@ -889,14 +894,14 @@ mod tests {
         // After a discovered attack, both the moved piece and the uncovered piece give check.
         // Position: white king c1, black rook on c8 (check on c-file), black knight on b3
         // (check on c1). Double check!
-        let mut board =
-            Board::from_fen("2r5/8/8/8/8/1n6/8/2K5 w - - 0 1").unwrap();
+        let mut board = Board::from_fen("2r5/8/8/8/8/1n6/8/2K5 w - - 0 1").unwrap();
         assert!(board.in_check());
         let moves = board.generate_legal_moves();
         // Every legal move must be a king move (from c1).
         for &m in moves.as_slice() {
             assert_eq!(
-                m.from_sq(), Square::C1,
+                m.from_sq(),
+                Square::C1,
                 "in double check, only king can move, but found move {m}"
             );
         }
@@ -907,15 +912,20 @@ mod tests {
     #[test]
     fn promotion_capture_all_pieces() {
         // White pawn on a7, black knight on b8. Pawn can promote by capturing.
-        let mut board =
-            Board::from_fen("1n2k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let mut board = Board::from_fen("1n2k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
         let moves = board.generate_legal_moves();
-        let promo_captures: Vec<_> = moves.iter()
+        let promo_captures: Vec<_> = moves
+            .iter()
             .filter(|m| m.is_promotion() && m.to_sq() == Square::B8)
             .collect();
-        assert_eq!(promo_captures.len(), 4, "should have 4 promotion-capture moves (N/B/R/Q)");
+        assert_eq!(
+            promo_captures.len(),
+            4,
+            "should have 4 promotion-capture moves (N/B/R/Q)"
+        );
         // Also verify non-capture promotions (a7a8).
-        let promo_pushes: Vec<_> = moves.iter()
+        let promo_pushes: Vec<_> = moves
+            .iter()
             .filter(|m| m.is_promotion() && m.to_sq() == Square::A8)
             .collect();
         assert_eq!(promo_pushes.len(), 4, "should have 4 promotion-push moves");
@@ -924,8 +934,7 @@ mod tests {
     // Pawn on 7th rank MUST promote — no non-promotion push to 8th rank.
     #[test]
     fn pawn_must_promote_on_last_rank() {
-        let mut board =
-            Board::from_fen("4k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let mut board = Board::from_fen("4k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
         let moves = board.generate_legal_moves();
         for &m in moves.as_slice() {
             if m.from_sq() == Square::A7 && m.to_sq() == Square::A8 {

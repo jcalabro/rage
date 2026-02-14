@@ -85,14 +85,8 @@ mod tests {
     #[test]
     fn tt_move_highest_priority() {
         let board = Board::starting_position();
-        let tt_move = Move::new(
-            rage_core::Square::E2,
-            rage_core::Square::E4,
-        );
-        let other_move = Move::new(
-            rage_core::Square::D2,
-            rage_core::Square::D4,
-        );
+        let tt_move = Move::new(rage_core::Square::E2, rage_core::Square::E4);
+        let other_move = Move::new(rage_core::Square::D2, rage_core::Square::D4);
         let tt_score = score_move(&board, tt_move, tt_move);
         let other_score = score_move(&board, other_move, tt_move);
         assert!(tt_score > other_score, "TT move should have highest score");
@@ -119,13 +113,10 @@ mod tests {
     #[test]
     fn mvv_lva_queen_capture_beats_pawn_capture() {
         // Position with various captures available
-        let board = Board::from_fen(
-            "rnbqkb1r/pppppppp/5n2/4N3/8/8/PPPPPPPP/RNBQKB1R w KQkq - 2 2",
-        )
-        .unwrap();
+        let board = Board::from_fen("rnbqkb1r/pppppppp/5n2/4N3/8/8/PPPPPPPP/RNBQKB1R w KQkq - 2 2")
+            .unwrap();
         // Knight captures knight on f6 (victim=320, attacker=320)
-        let capture_knight =
-            Move::new(rage_core::Square::E5, rage_core::Square::F6);
+        let capture_knight = Move::new(rage_core::Square::E5, rage_core::Square::F6);
         // This is a fictional scenario for ordering - test the scoring function
         let score = mvv_lva_score(&board, capture_knight);
         // victim_value * 10 - attacker_value = 320*10 - 320 = 2880
