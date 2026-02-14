@@ -102,6 +102,11 @@ impl Move {
     pub const fn raw(self) -> u16 {
         self.0
     }
+
+    /// Reconstruct a Move from its raw u16 encoding.
+    pub const fn from_raw(raw: u16) -> Self {
+        Self(raw)
+    }
 }
 
 /// Display as UCI long algebraic notation (e.g. "e2e4", "e7e8q").

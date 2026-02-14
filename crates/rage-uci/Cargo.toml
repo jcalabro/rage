@@ -1,0 +1,11 @@
+[package]
+name = "rage-uci"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rage-core = { path = "../rage-core" }
+rage-search = { path = "../rage-search" }

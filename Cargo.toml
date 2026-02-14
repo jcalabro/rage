@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "crates/rage-core",
+    "crates/rage-search",
+    "crates/rage-uci",
     "crates/rage-engine",
 ]
 

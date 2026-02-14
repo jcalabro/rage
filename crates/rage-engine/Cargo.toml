@@ -12,3 +12,4 @@ path = "src/main.rs"
 
 [dependencies]
 rage-core = { path = "../rage-core" }
+rage-uci = { path = "../rage-uci" }

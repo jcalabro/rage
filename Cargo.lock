@@ -270,6 +270,22 @@ name = "rage-engine"
 version = "0.1.0"
 dependencies = [
  "rage-core",
+ "rage-uci",
+]
+
+[[package]]
+name = "rage-search"
+version = "0.1.0"
+dependencies = [
+ "rage-core",
+]
+
+[[package]]
+name = "rage-uci"
+version = "0.1.0"
+dependencies = [
+ "rage-core",
+ "rage-search",
 ]
 
 [[package]]
