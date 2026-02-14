@@ -846,16 +846,18 @@ impl Searcher {
                             let prev_to = prev_move.to_sq();
 
                             // Malus for previously searched quiet moves (not the cutoff move)
-                            for (&sq_move, &sq_piece) in searched_quiets
-                                [..num_searched_quiets - 1]
+                            for (&sq_move, &sq_piece) in searched_quiets[..num_searched_quiets - 1]
                                 .iter()
                                 .zip(&searched_quiet_pieces[..num_searched_quiets - 1])
                             {
                                 self.history.update(stm, sq_move, -bonus);
                                 if has_prev {
                                     self.cont_history.update(
-                                        prev_piece, prev_to, sq_piece,
-                                        sq_move.to_sq(), -bonus,
+                                        prev_piece,
+                                        prev_to,
+                                        sq_piece,
+                                        sq_move.to_sq(),
+                                        -bonus,
                                     );
                                 }
                             }
@@ -864,8 +866,11 @@ impl Searcher {
                             if has_prev {
                                 self.counter_moves.store(prev_piece, prev_to, m);
                                 self.cont_history.update(
-                                    prev_piece, prev_to, piece_moved,
-                                    m.to_sq(), bonus,
+                                    prev_piece,
+                                    prev_to,
+                                    piece_moved,
+                                    m.to_sq(),
+                                    bonus,
                                 );
                             }
                         }

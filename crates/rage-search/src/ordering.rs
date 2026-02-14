@@ -438,16 +438,34 @@ mod tests {
         let mut ch = ContinuationHistory::new();
 
         // Populate several entries
-        ch.update(PieceType::Pawn, rage_core::Square::E4, PieceType::Knight, rage_core::Square::F3, 300);
-        ch.update(PieceType::Queen, rage_core::Square::D1, PieceType::Rook, rage_core::Square::A1, -200);
+        ch.update(
+            PieceType::Pawn,
+            rage_core::Square::E4,
+            PieceType::Knight,
+            rage_core::Square::F3,
+            300,
+        );
+        ch.update(
+            PieceType::Queen,
+            rage_core::Square::D1,
+            PieceType::Rook,
+            rage_core::Square::A1,
+            -200,
+        );
 
         ch.clear();
 
         // All entries should be zero
         let e1 = ch.get_entry(PieceType::Pawn, rage_core::Square::E4);
         let e2 = ch.get_entry(PieceType::Queen, rage_core::Square::D1);
-        assert_eq!(e1[PieceType::Knight.index()][rage_core::Square::F3.index()], 0);
-        assert_eq!(e2[PieceType::Rook.index()][rage_core::Square::A1.index()], 0);
+        assert_eq!(
+            e1[PieceType::Knight.index()][rage_core::Square::F3.index()],
+            0
+        );
+        assert_eq!(
+            e2[PieceType::Rook.index()][rage_core::Square::A1.index()],
+            0
+        );
     }
 
     #[test]
@@ -457,7 +475,13 @@ mod tests {
         let curr_to = rage_core::Square::E4;
 
         // Update for one previous move context
-        ch.update(PieceType::Knight, rage_core::Square::F3, curr_piece, curr_to, 500);
+        ch.update(
+            PieceType::Knight,
+            rage_core::Square::F3,
+            curr_piece,
+            curr_to,
+            500,
+        );
 
         // Different previous move context should be unaffected
         let other = ch.get_entry(PieceType::Bishop, rage_core::Square::C4);
@@ -495,7 +519,8 @@ mod tests {
             "cont_hist bonus should increase quiet score: {score_with} vs {score_without}"
         );
         assert_eq!(
-            score_with - score_without, 5000,
+            score_with - score_without,
+            5000,
             "cont_hist should add the exact entry value"
         );
     }
@@ -546,7 +571,10 @@ mod tests {
         };
         let score = score_move(&board, killer, &ctx, &history);
 
-        assert_eq!(score, KILLER1_SCORE, "killer should use fixed score, not cont_hist");
+        assert_eq!(
+            score, KILLER1_SCORE,
+            "killer should use fixed score, not cont_hist"
+        );
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use std::io::{self, BufRead, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Instant;
 
 use rage_core::Board;
 use rage_search::search::InfoCallback;
@@ -67,6 +68,12 @@ struct UciEngine {
     pool: Option<ThreadPool>,
     stop: Arc<AtomicBool>,
     search_handle: Option<thread::JoinHandle<ThreadPool>>,
+    /// Shared flag: true while pondering, flipped to false on `ponderhit`.
+    ponder_flag: Option<Arc<AtomicBool>>,
+    /// Shared offset written on `ponderhit` so time management starts from that moment.
+    ponder_offset: Option<Arc<AtomicU64>>,
+    /// When pondering started, used to compute the offset on `ponderhit`.
+    ponder_start: Option<Instant>,
 }
 
 impl UciEngine {
@@ -76,6 +83,9 @@ impl UciEngine {
             pool: Some(ThreadPool::new(DEFAULT_THREADS, DEFAULT_HASH_MB)),
             stop: Arc::new(AtomicBool::new(false)),
             search_handle: None,
+            ponder_flag: None,
+            ponder_offset: None,
+            ponder_start: None,
         }
     }
 
@@ -104,6 +114,7 @@ impl UciEngine {
             "position" => self.cmd_position(&mut tokens),
             "go" => self.cmd_go(&mut tokens),
             "stop" => self.cmd_stop(),
+            "ponderhit" => self.cmd_ponderhit(),
             "setoption" => self.cmd_setoption(&mut tokens),
             "quit" => {
                 self.cmd_stop();
@@ -130,6 +141,7 @@ impl UciEngine {
         println!();
         println!("option name Hash type spin default {DEFAULT_HASH_MB} min 1 max 1024");
         println!("option name Threads type spin default {DEFAULT_THREADS} min 1 max 256");
+        println!("option name Ponder type check default true");
         println!("uciok");
     }
 
@@ -193,6 +205,7 @@ impl UciEngine {
         self.wait_for_search();
 
         let mut limits = SearchLimits::default();
+        let mut is_ponder = false;
 
         while let Some(token) = tokens.next() {
             match token {
@@ -205,8 +218,24 @@ impl UciEngine {
                 "movestogo" => limits.movestogo = tokens.next().and_then(|s| s.parse().ok()),
                 "nodes" => limits.nodes = tokens.next().and_then(|s| s.parse().ok()),
                 "infinite" => limits.infinite = true,
+                "ponder" => is_ponder = true,
                 _ => {}
             }
+        }
+
+        // Set up ponder atomics if pondering
+        if is_ponder {
+            let ponder_flag = Arc::new(AtomicBool::new(true));
+            let ponder_offset = Arc::new(AtomicU64::new(0));
+            limits.ponder = Some(Arc::clone(&ponder_flag));
+            limits.ponder_offset = Some(Arc::clone(&ponder_offset));
+            self.ponder_flag = Some(ponder_flag);
+            self.ponder_offset = Some(ponder_offset);
+            self.ponder_start = Some(Instant::now());
+        } else {
+            self.ponder_flag = None;
+            self.ponder_offset = None;
+            self.ponder_start = None;
         }
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -243,7 +272,13 @@ impl UciEngine {
             });
 
             let result = pool.search(&mut board, &limits, stop, Some(info_cb));
-            println!("bestmove {}", result.best_move);
+
+            // Output bestmove with ponder move if PV has a second move
+            if result.pv.len() >= 2 {
+                println!("bestmove {} ponder {}", result.best_move, result.pv[1]);
+            } else {
+                println!("bestmove {}", result.best_move);
+            }
             let _ = io::stdout().flush();
 
             // Return the pool so state is preserved
@@ -254,7 +289,26 @@ impl UciEngine {
     }
 
     fn cmd_stop(&mut self) {
+        self.ponder_flag = None;
+        self.ponder_offset = None;
+        self.ponder_start = None;
         self.wait_for_search();
+    }
+
+    fn cmd_ponderhit(&mut self) {
+        // Compute how long we've been pondering and record it as the offset,
+        // so time management starts from this moment.
+        if let (Some(flag), Some(offset), Some(start)) =
+            (&self.ponder_flag, &self.ponder_offset, self.ponder_start)
+        {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            offset.store(elapsed_ms, Ordering::Relaxed);
+            flag.store(false, Ordering::Relaxed);
+        }
+        // Clear ponder state (atomics are already shared with the search)
+        self.ponder_flag = None;
+        self.ponder_offset = None;
+        self.ponder_start = None;
     }
 
     fn cmd_setoption<'a>(&mut self, tokens: &mut impl Iterator<Item = &'a str>) {
@@ -494,8 +548,13 @@ impl UciEngine {
         println!("  isready        Synchronize with engine");
         println!("  ucinewgame     Reset engine state for a new game");
         println!("  position       Set board position (startpos/fen + moves)");
-        println!("  go             Start searching (depth/movetime/wtime/btime/infinite/...)");
+        println!(
+            "  go             Start searching (depth/movetime/wtime/btime/infinite/ponder/...)"
+        );
         println!("  stop           Stop searching");
+        println!(
+            "  ponderhit      Opponent played the expected move (switch from ponder to normal)"
+        );
         println!("  setoption      Set engine option (name <n> value <v>)");
         println!("  quit           Exit the engine");
         println!();
@@ -703,5 +762,60 @@ mod tests {
         // Only e2e4 should have been applied
         let fen = engine.board.to_fen();
         assert!(fen.contains("4P3"), "e2e4 should have been applied: {fen}");
+    }
+
+    #[test]
+    fn go_ponder_sets_ponder_flag() {
+        let mut engine = UciEngine::new();
+        engine.handle_command("position startpos");
+        engine.handle_command("go ponder wtime 60000 btime 60000");
+        // Ponder flag should be set
+        assert!(engine.ponder_flag.is_some());
+        assert!(engine.ponder_offset.is_some());
+        assert!(engine.ponder_start.is_some());
+        // Let it search briefly then stop
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        engine.handle_command("stop");
+        assert!(engine.pool.is_some());
+    }
+
+    #[test]
+    fn ponderhit_transitions_to_normal_search() {
+        let mut engine = UciEngine::new();
+        engine.handle_command("position startpos");
+        engine.handle_command("go ponder wtime 60000 btime 60000");
+        // Let it ponder briefly
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Ponderhit: opponent played the expected move
+        engine.handle_command("ponderhit");
+        // Ponder state should be cleared
+        assert!(engine.ponder_flag.is_none());
+        assert!(engine.ponder_offset.is_none());
+        assert!(engine.ponder_start.is_none());
+        // Stop and verify pool recovered
+        engine.handle_command("stop");
+        assert!(engine.pool.is_some());
+    }
+
+    #[test]
+    fn ponderhit_without_ponder_is_noop() {
+        let mut engine = UciEngine::new();
+        // ponderhit when not pondering should do nothing
+        engine.handle_command("ponderhit");
+        assert!(engine.ponder_flag.is_none());
+    }
+
+    #[test]
+    fn go_without_ponder_clears_ponder_state() {
+        let mut engine = UciEngine::new();
+        engine.handle_command("position startpos");
+        // First do a ponder search
+        engine.handle_command("go ponder depth 3");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        engine.handle_command("stop");
+        // Now do a normal search — ponder state should be cleared
+        engine.handle_command("go depth 3");
+        assert!(engine.ponder_flag.is_none());
+        engine.handle_command("stop");
     }
 }

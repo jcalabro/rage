@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use rage_core::Color;
@@ -16,6 +16,13 @@ pub struct SearchLimits {
     pub movestogo: Option<u32>,
     pub infinite: bool,
     pub nodes: Option<u64>,
+    /// When true, the engine is pondering (searching on opponent's time).
+    /// Time limits are ignored until `ponderhit` flips this to false.
+    pub ponder: Option<Arc<AtomicBool>>,
+    /// Offset in milliseconds to subtract from elapsed time after `ponderhit`.
+    /// Set by the UCI layer when `ponderhit` is received so that time management
+    /// starts from the moment the opponent moved, not from when pondering began.
+    pub ponder_offset: Option<Arc<AtomicU64>>,
 }
 
 /// Time manager: determines how long the engine can search.
@@ -27,6 +34,10 @@ pub struct TimeManager {
     max_nodes: u64,
     stop: Arc<AtomicBool>,
     node_check_counter: u64,
+    /// While true, time/node limits are ignored (only external stop is checked).
+    ponder: Option<Arc<AtomicBool>>,
+    /// Milliseconds to subtract from elapsed time after ponderhit.
+    ponder_offset: Option<Arc<AtomicU64>>,
 }
 
 /// Safety margin subtracted from allocated time to account for overhead.
@@ -48,6 +59,8 @@ impl TimeManager {
             max_nodes: limits.nodes.unwrap_or(u64::MAX),
             stop,
             node_check_counter: 0,
+            ponder: limits.ponder.clone(),
+            ponder_offset: limits.ponder_offset.clone(),
         }
     }
 
@@ -88,9 +101,15 @@ impl TimeManager {
 
     /// Returns true if the engine should stop searching (time exceeded or stop requested).
     /// Only does the expensive clock check every NODE_CHECK_INTERVAL nodes.
+    /// While pondering, only the external stop flag is checked.
     pub fn should_stop(&mut self, nodes: u64) -> bool {
         if self.stop.load(Ordering::Relaxed) {
             return true;
+        }
+
+        // While pondering, ignore time and node limits
+        if self.is_pondering() {
+            return false;
         }
 
         if nodes >= self.max_nodes {
@@ -109,8 +128,9 @@ impl TimeManager {
     }
 
     /// Returns true if the soft time limit has been exceeded (don't start new iteration).
+    /// Always returns false while pondering.
     pub fn soft_limit_reached(&self) -> bool {
-        if self.soft_limit_ms == u64::MAX {
+        if self.is_pondering() || self.soft_limit_ms == u64::MAX {
             return false;
         }
         self.elapsed_ms() >= self.soft_limit_ms
@@ -118,8 +138,9 @@ impl TimeManager {
 
     /// Returns true if the given percentage of the soft limit has been reached.
     /// `pct` is 0-100. Used for best-move stability: stable moves use less time.
+    /// Always returns false while pondering.
     pub fn soft_limit_reached_fraction(&self, pct: u64) -> bool {
-        if self.soft_limit_ms == u64::MAX {
+        if self.is_pondering() || self.soft_limit_ms == u64::MAX {
             return false;
         }
         self.elapsed_ms() >= self.soft_limit_ms * pct / 100
@@ -130,9 +151,23 @@ impl TimeManager {
         self.max_depth
     }
 
+    /// Returns true if the engine is currently pondering (searching on opponent's time).
+    fn is_pondering(&self) -> bool {
+        self.ponder
+            .as_ref()
+            .is_some_and(|p| p.load(Ordering::Relaxed))
+    }
+
     /// Elapsed time since search started, in milliseconds.
+    /// After ponderhit, subtracts the ponder offset so that time management
+    /// starts from the moment the opponent moved.
     pub fn elapsed_ms(&self) -> u64 {
-        self.start.elapsed().as_millis() as u64
+        let raw = self.start.elapsed().as_millis() as u64;
+        let offset = self
+            .ponder_offset
+            .as_ref()
+            .map_or(0, |o| o.load(Ordering::Relaxed));
+        raw.saturating_sub(offset)
     }
 }
 
@@ -200,6 +235,90 @@ mod tests {
         let mut tm = TimeManager::new(&limits, Color::White, Arc::clone(&stop));
         assert!(!tm.should_stop(0));
 
+        stop.store(true, Ordering::Relaxed);
+        assert!(tm.should_stop(0));
+    }
+
+    #[test]
+    fn ponder_ignores_time_limits() {
+        let ponder_flag = Arc::new(AtomicBool::new(true));
+        let ponder_offset = Arc::new(AtomicU64::new(0));
+        let limits = SearchLimits {
+            wtime: Some(1), // 1ms — would immediately expire without pondering
+            ponder: Some(Arc::clone(&ponder_flag)),
+            ponder_offset: Some(Arc::clone(&ponder_offset)),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut tm = TimeManager::new(&limits, Color::White, stop);
+
+        // Even though wtime is tiny, pondering suppresses time checks
+        assert!(!tm.should_stop(0));
+        assert!(!tm.soft_limit_reached());
+        assert!(!tm.soft_limit_reached_fraction(50));
+    }
+
+    #[test]
+    fn ponderhit_enables_time_management() {
+        let ponder_flag = Arc::new(AtomicBool::new(true));
+        let ponder_offset = Arc::new(AtomicU64::new(0));
+        let limits = SearchLimits {
+            movetime: Some(100_000), // 100 seconds — won't expire during test
+            ponder: Some(Arc::clone(&ponder_flag)),
+            ponder_offset: Some(Arc::clone(&ponder_offset)),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let tm = TimeManager::new(&limits, Color::White, stop);
+
+        // While pondering: soft limit not reached
+        assert!(!tm.soft_limit_reached());
+
+        // Simulate ponderhit: flip flag, set offset to elapsed time
+        let elapsed = tm.start.elapsed().as_millis() as u64;
+        ponder_offset.store(elapsed, Ordering::Relaxed);
+        ponder_flag.store(false, Ordering::Relaxed);
+
+        // After ponderhit: time management is active but we have plenty of time
+        assert!(!tm.soft_limit_reached());
+    }
+
+    #[test]
+    fn ponder_offset_adjusts_elapsed() {
+        let ponder_offset = Arc::new(AtomicU64::new(0));
+        let limits = SearchLimits {
+            ponder_offset: Some(Arc::clone(&ponder_offset)),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let tm = TimeManager::new(&limits, Color::White, stop);
+
+        // Sleep briefly so elapsed_ms > 0
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let raw_elapsed = tm.start.elapsed().as_millis() as u64;
+        assert!(raw_elapsed >= 10);
+
+        // Set offset to just under raw elapsed — elapsed_ms should be near zero
+        ponder_offset.store(raw_elapsed, Ordering::Relaxed);
+        let adjusted = tm.elapsed_ms();
+        assert!(
+            adjusted < 5,
+            "adjusted elapsed should be near zero, got {adjusted}"
+        );
+    }
+
+    #[test]
+    fn ponder_stop_still_works() {
+        let ponder_flag = Arc::new(AtomicBool::new(true));
+        let limits = SearchLimits {
+            ponder: Some(Arc::clone(&ponder_flag)),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut tm = TimeManager::new(&limits, Color::White, Arc::clone(&stop));
+
+        // While pondering, external stop still works
+        assert!(!tm.should_stop(0));
         stop.store(true, Ordering::Relaxed);
         assert!(tm.should_stop(0));
     }
