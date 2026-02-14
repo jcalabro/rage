@@ -306,50 +306,136 @@ impl UciEngine {
     fn cmd_display_pretty(&self) {
         use rage_core::{Color, File, PieceType, Rank, Square};
 
-        const LIGHT_BG: &str = "\x1b[48;2;240;217;181m";
-        const DARK_BG: &str = "\x1b[48;2;181;136;99m";
-        const WHITE_FG: &str = "\x1b[38;2;255;255;255m";
-        const BLACK_FG: &str = "\x1b[38;2;0;0;0m";
+        // Board square colors - warm wood tones
+        const LIGHT_BG: &str = "\x1b[48;2;238;216;180m";
+        const DARK_BG: &str = "\x1b[48;2;180;136;100m";
+        // Piece colors - high contrast against both square colors
+        const WHITE_PC: &str = "\x1b[38;2;255;255;240m";
+        const BLACK_PC: &str = "\x1b[38;2;40;30;20m";
+        // UI colors
+        const COORD_FG: &str = "\x1b[38;2;140;120;100m";
+        const LABEL_FG: &str = "\x1b[38;2;180;160;140m";
+        const DIM: &str = "\x1b[2m";
         const BOLD: &str = "\x1b[1m";
         const RESET: &str = "\x1b[0m";
 
-        fn piece_char(pt: PieceType) -> char {
-            match pt {
-                PieceType::King => '\u{265A}',
-                PieceType::Queen => '\u{265B}',
-                PieceType::Rook => '\u{265C}',
-                PieceType::Bishop => '\u{265D}',
-                PieceType::Knight => '\u{265E}',
-                PieceType::Pawn => '\u{265F}',
+        // Chess piece characters (all single-cell-width Unicode, no variation selectors)
+        fn piece_char(pt: PieceType, color: Color) -> char {
+            match (color, pt) {
+                (Color::White, PieceType::King) => '\u{2654}',
+                (Color::White, PieceType::Queen) => '\u{2655}',
+                (Color::White, PieceType::Rook) => '\u{2656}',
+                (Color::White, PieceType::Bishop) => '\u{2657}',
+                (Color::White, PieceType::Knight) => '\u{2658}',
+                (Color::White, PieceType::Pawn) => '\u{2659}',
+                (Color::Black, PieceType::King) => '\u{265A}',
+                (Color::Black, PieceType::Queen) => '\u{265B}',
+                (Color::Black, PieceType::Rook) => '\u{265C}',
+                (Color::Black, PieceType::Bishop) => '\u{265D}',
+                (Color::Black, PieceType::Knight) => '\u{265E}',
+                (Color::Black, PieceType::Pawn) => '\u{265F}',
             }
         }
 
-        println!("\n    a   b   c   d   e   f   g   h");
-        println!("  +---+---+---+---+---+---+---+---+");
+        // Collect material for each side
+        let mut white_pieces = Vec::new();
+        let mut black_pieces = Vec::new();
+        for rank in 0..8 {
+            for file in 0..8 {
+                let sq = Square::from_file_rank(File::new(file), Rank::new(rank));
+                if let Some(p) = self.board.piece_on(sq) {
+                    let ch = piece_char(p.piece_type, p.color);
+                    match p.color {
+                        Color::White => white_pieces.push((p.piece_type, ch)),
+                        Color::Black => black_pieces.push((p.piece_type, ch)),
+                    }
+                }
+            }
+        }
+
+        // Sort pieces by value (king, queen, rook, bishop, knight, pawn)
+        fn piece_sort_key(pt: PieceType) -> u8 {
+            match pt {
+                PieceType::King => 0,
+                PieceType::Queen => 1,
+                PieceType::Rook => 2,
+                PieceType::Bishop => 3,
+                PieceType::Knight => 4,
+                PieceType::Pawn => 5,
+            }
+        }
+        white_pieces.sort_by_key(|(pt, _)| piece_sort_key(*pt));
+        black_pieces.sort_by_key(|(pt, _)| piece_sort_key(*pt));
+
+        println!();
+
+        // Black material (shown above board)
+        let black_material: String =
+            black_pieces.iter().map(|(_, c)| c.to_string()).collect::<Vec<_>>().join(" ");
+        println!("  {COORD_FG}{black_material}{RESET}");
+
+        // Each square is 5 terminal cells wide: "  X  " for pieces, "     " for empty.
+        // Prefix is 4 visible chars: "  N " (2 spaces + rank digit + space).
+        // File labels are centered under each 5-cell square.
+        println!("  {COORD_FG}    a    b    c    d    e    f    g    h{RESET}");
+
+        // Board rows
         for rank in (0..8).rev() {
-            print!("{} ", rank + 1);
+            print!("  {COORD_FG}{}{RESET} ", rank + 1);
             for file in 0..8 {
                 let sq = Square::from_file_rank(File::new(file), Rank::new(rank));
                 let is_light = (file + rank) % 2 != 0;
                 let bg = if is_light { LIGHT_BG } else { DARK_BG };
+
                 match self.board.piece_on(sq) {
                     Some(p) => {
                         let fg = match p.color {
-                            Color::White => WHITE_FG,
-                            Color::Black => BLACK_FG,
+                            Color::White => WHITE_PC,
+                            Color::Black => BLACK_PC,
                         };
-                        print!("{bg}{BOLD}{fg} {c} {RESET}", c = piece_char(p.piece_type));
+                        let ch = piece_char(p.piece_type, p.color);
+                        // 5 cells: 2 spaces + piece(1 cell) + 2 spaces
+                        print!("{bg}{BOLD}{fg}  {ch}  {RESET}");
                     }
-                    None => print!("{bg}   {RESET}"),
+                    // 5 cells: all spaces
+                    None => print!("{bg}     {RESET}"),
                 }
-                print!("\x1b[0m");
             }
-            println!(" {}", rank + 1);
-            println!("  +---+---+---+---+---+---+---+---+");
+            println!(" {COORD_FG}{}{RESET}", rank + 1);
         }
-        println!("    a   b   c   d   e   f   g   h\n");
-        println!("FEN: {}", self.board.to_fen());
-        println!("Hash: {:016x}", self.board.zobrist_hash());
+
+        println!("  {COORD_FG}    a    b    c    d    e    f    g    h{RESET}");
+
+        // White material (shown below board)
+        let white_material: String =
+            white_pieces.iter().map(|(_, c)| c.to_string()).collect::<Vec<_>>().join(" ");
+        println!("  {COORD_FG}{white_material}{RESET}");
+
+        println!();
+
+        // Game info
+        let side = match self.board.side_to_move() {
+            Color::White => "White",
+            Color::Black => "Black",
+        };
+        let ep = self
+            .board
+            .en_passant_square()
+            .map_or("-".to_string(), |sq| sq.to_string());
+        println!(
+            "  {LABEL_FG}{DIM}Turn:{RESET}  {side}    {LABEL_FG}{DIM}Castling:{RESET}  {}    {LABEL_FG}{DIM}EP:{RESET}  {ep}    {LABEL_FG}{DIM}Move:{RESET}  {}",
+            self.board.castling_rights(),
+            self.board.fullmove_number(),
+        );
+        println!(
+            "  {LABEL_FG}{DIM}FEN:{RESET}   {}",
+            self.board.to_fen()
+        );
+        println!(
+            "  {LABEL_FG}{DIM}Hash:{RESET}  {:016x}",
+            self.board.zobrist_hash()
+        );
+        println!();
     }
 
     fn cmd_eval(&self) {
