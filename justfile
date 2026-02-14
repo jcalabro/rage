@@ -33,4 +33,4 @@ build *ARGS:
 
 # Builds and runs rage
 run *ARGS:
-    cargo run {{ARGS}}
+    cargo run --bin rage {{ARGS}}
