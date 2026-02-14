@@ -98,6 +98,7 @@ struct StackEntry {
     static_eval: i32,
     move_played: Move,
     piece_moved: PieceType,
+    excluded_move: Move,
 }
 
 impl StackEntry {
@@ -105,6 +106,7 @@ impl StackEntry {
         static_eval: 0,
         move_played: Move::NULL,
         piece_moved: PieceType::Pawn,
+        excluded_move: Move::NULL,
     };
 }
 
@@ -422,9 +424,11 @@ impl Searcher {
 
         // TT probe
         let hash = board.zobrist_hash();
-        let tt_move = if let Some(entry) = self.tt.probe(hash, ply) {
-            // TT cutoff (only at non-PV nodes)
-            if !pv_node && entry.depth >= depth as u8 {
+        let excluded = self.stack[ply as usize + 2].excluded_move;
+        let (tt_move, tt_score, tt_depth, tt_bound) = if let Some(entry) = self.tt.probe(hash, ply)
+        {
+            // TT cutoff (only at non-PV nodes, skip during singular verification)
+            if !pv_node && entry.depth >= depth as u8 && excluded.is_null() {
                 match entry.bound {
                     Bound::Exact => return entry.score,
                     Bound::Lower => {
@@ -440,9 +444,9 @@ impl Searcher {
                     Bound::None => {}
                 }
             }
-            entry.best_move
+            (entry.best_move, entry.score, entry.depth, entry.bound)
         } else {
-            Move::NULL
+            (Move::NULL, 0, 0, Bound::None)
         };
 
         // Static evaluation (not useful when in check)
@@ -502,6 +506,58 @@ impl Searcher {
                         return beta;
                     }
                     return null_score;
+                }
+            }
+
+            // Probcut: at moderate depths, try a shallow capture search
+            // with a raised beta to see if we can prune
+            if depth >= 5 && static_eval.abs() < MATE_SCORE - 256 {
+                let probcut_beta = beta + 200;
+                let pc_moves = board.generate_legal_moves();
+
+                for pc_m in &pc_moves {
+                    if !board.is_capture(*pc_m) || !see::see_ge(board, *pc_m, 0) {
+                        continue;
+                    }
+
+                    let pc_piece = board
+                        .piece_on(pc_m.from_sq())
+                        .map_or(PieceType::Pawn, |p| p.piece_type);
+                    let pc_capt = if pc_m.is_en_passant() {
+                        Some(PieceType::Pawn)
+                    } else {
+                        board.piece_on(pc_m.to_sq()).map(|p| p.piece_type)
+                    };
+                    let pc_stm = board.side_to_move();
+
+                    board.make_move(*pc_m);
+                    self.update_acc_after_move(
+                        board,
+                        *pc_m,
+                        pc_piece,
+                        pc_capt,
+                        pc_stm,
+                        ply,
+                        ply + 1,
+                    );
+                    let pc_score = -self.negamax(
+                        board,
+                        tm,
+                        -probcut_beta,
+                        -probcut_beta + 1,
+                        depth - 4,
+                        ply + 1,
+                        true,
+                    );
+                    board.unmake_move(*pc_m);
+
+                    if self.stopped {
+                        return 0;
+                    }
+
+                    if pc_score >= probcut_beta {
+                        return probcut_beta;
+                    }
                 }
             }
         }
@@ -565,6 +621,12 @@ impl Searcher {
         for i in 0..num_moves {
             pick_move(&mut move_buf[..num_moves], &mut scores[..num_moves], i);
             let m = move_buf[i];
+
+            // Skip the excluded move (used during singular extension verification)
+            if m == excluded && !excluded.is_null() {
+                continue;
+            }
+
             let is_capture = board.is_capture(m);
             let is_quiet = !is_capture && !m.is_promotion();
             move_count += 1;
@@ -606,6 +668,35 @@ impl Searcher {
                 num_searched_quiets += 1;
             }
 
+            // Singular extension: if the TT move is clearly best, extend its search
+            let mut extension = 0u32;
+            if !is_root
+                && m == tt_move
+                && !tt_move.is_null()
+                && depth >= 6
+                && tt_depth >= depth as u8 - 3
+                && (tt_bound == Bound::Exact || tt_bound == Bound::Lower)
+                && tt_score.abs() < MATE_SCORE - 256
+                && excluded.is_null()
+            {
+                let s_beta = tt_score - 2 * depth as i32;
+                let s_depth = (depth - 1) / 2;
+
+                self.stack[ply as usize + 2].excluded_move = m;
+                let s_score = self.negamax(board, tm, s_beta - 1, s_beta, s_depth, ply, false);
+                self.stack[ply as usize + 2].excluded_move = Move::NULL;
+
+                if self.stopped {
+                    return 0;
+                }
+
+                if s_score < s_beta {
+                    extension = 1; // singular — extend
+                } else if s_beta >= beta {
+                    return s_beta; // multi-cut — prune
+                }
+            }
+
             // Capture info for NNUE accumulator update before make_move
             let captured_pt = if m.is_en_passant() {
                 Some(PieceType::Pawn)
@@ -617,10 +708,11 @@ impl Searcher {
             self.update_acc_after_move(board, m, piece_moved, captured_pt, stm, ply, ply + 1);
 
             // PVS: first move gets full window, rest get zero window
+            let new_depth = depth - 1 + extension;
             let score;
             if move_count == 1 {
                 // First move: full window
-                score = -self.negamax(board, tm, -beta, -alpha, depth - 1, ply + 1, true);
+                score = -self.negamax(board, tm, -beta, -alpha, new_depth, ply + 1, true);
             } else {
                 // Late move reductions
                 let mut reduction = 0u32;
@@ -660,19 +752,19 @@ impl Searcher {
                     tm,
                     -alpha - 1,
                     -alpha,
-                    depth - 1 - reduction,
+                    new_depth.saturating_sub(reduction),
                     ply + 1,
                     true,
                 );
 
                 // Re-search at full depth if reduced search failed high
                 if s > alpha && reduction > 0 {
-                    s = -self.negamax(board, tm, -alpha - 1, -alpha, depth - 1, ply + 1, true);
+                    s = -self.negamax(board, tm, -alpha - 1, -alpha, new_depth, ply + 1, true);
                 }
 
                 // Re-search with full window if zero-window failed high
                 if s > alpha && s < beta {
-                    s = -self.negamax(board, tm, -beta, -alpha, depth - 1, ply + 1, true);
+                    s = -self.negamax(board, tm, -beta, -alpha, new_depth, ply + 1, true);
                 }
 
                 score = s;
@@ -727,9 +819,11 @@ impl Searcher {
             }
         }
 
-        // Store in TT
-        self.tt
-            .store(hash, best_move, best_score, depth as u8, bound, ply);
+        // Store in TT (skip during singular extension verification)
+        if excluded.is_null() {
+            self.tt
+                .store(hash, best_move, best_score, depth as u8, bound, ply);
+        }
 
         best_score
     }
