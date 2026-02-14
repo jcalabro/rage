@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+
 use rage_core::Move;
 
 use crate::eval::MATE_SCORE;
@@ -103,11 +105,15 @@ fn verification_key(hash: u64) -> u16 {
     (hash >> 48) as u16
 }
 
-/// Transposition table with always-replace policy.
+/// Lock-free transposition table using atomic operations.
+///
+/// All entries are stored as `AtomicU64` with `Relaxed` ordering.
+/// Torn reads/writes are acceptable — the verification key rejects garbage.
+/// This is `Send + Sync` without any `unsafe`.
 pub struct TranspositionTable {
-    entries: Vec<u64>,
+    entries: Vec<AtomicU64>,
     mask: usize,
-    generation: u8,
+    generation: AtomicU8,
 }
 
 impl TranspositionTable {
@@ -119,10 +125,15 @@ impl TranspositionTable {
         let num_entries = num_entries.next_power_of_two() >> 1;
         let num_entries = num_entries.max(1024);
 
+        let mut entries = Vec::with_capacity(num_entries);
+        for _ in 0..num_entries {
+            entries.push(AtomicU64::new(0));
+        }
+
         Self {
-            entries: vec![0u64; num_entries],
+            entries,
             mask: num_entries - 1,
-            generation: 0,
+            generation: AtomicU8::new(0),
         }
     }
 
@@ -130,7 +141,7 @@ impl TranspositionTable {
     /// Returns Some(entry) if found and verification key matches.
     pub fn probe(&self, hash: u64, ply: u32) -> Option<TTEntry> {
         let index = hash as usize & self.mask;
-        let data = self.entries[index];
+        let data = self.entries[index].load(Ordering::Relaxed);
 
         if data == 0 {
             return None;
@@ -147,16 +158,8 @@ impl TranspositionTable {
         })
     }
 
-    /// Store an entry in the TT.
-    pub fn store(
-        &mut self,
-        hash: u64,
-        best_move: Move,
-        score: i32,
-        depth: u8,
-        bound: Bound,
-        ply: u32,
-    ) {
+    /// Store an entry in the TT. Lock-free via atomic store.
+    pub fn store(&self, hash: u64, best_move: Move, score: i32, depth: u8, bound: Bound, ply: u32) {
         let index = hash as usize & self.mask;
         let entry = TTEntry {
             key16: verification_key(hash),
@@ -164,35 +167,42 @@ impl TranspositionTable {
             score: score_to_tt(score, ply),
             depth,
             bound,
-            age: self.generation,
+            age: self.generation.load(Ordering::Relaxed),
         };
-        self.entries[index] = entry.pack();
+        self.entries[index].store(entry.pack(), Ordering::Relaxed);
     }
 
     /// Clear all entries.
-    pub fn clear(&mut self) {
-        self.entries.fill(0);
-        self.generation = 0;
+    pub fn clear(&self) {
+        for entry in &self.entries {
+            entry.store(0, Ordering::Relaxed);
+        }
+        self.generation.store(0, Ordering::Relaxed);
     }
 
     /// Resize the table to the given size in megabytes. Clears all entries.
+    /// Must only be called when no search is running.
     pub fn resize(&mut self, size_mb: usize) {
         *self = Self::new(size_mb);
     }
 
     /// Increment the generation counter (called at the start of each new search).
-    pub fn new_search(&mut self) {
-        self.generation = self.generation.wrapping_add(1) & 0x3F;
+    pub fn new_search(&self) {
+        let current = self.generation.load(Ordering::Relaxed);
+        self.generation
+            .store(current.wrapping_add(1) & 0x3F, Ordering::Relaxed);
     }
 
     /// Returns approximate usage as permille (0-1000).
     pub fn hashfull(&self) -> u32 {
         let sample = self.entries.len().min(1000);
+        let current_gen = self.generation.load(Ordering::Relaxed);
         let mut used = 0u32;
         for i in 0..sample {
-            if self.entries[i] != 0 {
-                let entry = TTEntry::unpack(self.entries[i]);
-                if entry.age == self.generation {
+            let data = self.entries[i].load(Ordering::Relaxed);
+            if data != 0 {
+                let entry = TTEntry::unpack(data);
+                if entry.age == current_gen {
                     used += 1;
                 }
             }
@@ -209,7 +219,7 @@ mod tests {
 
     #[test]
     fn store_and_probe() {
-        let mut tt = TranspositionTable::new(1);
+        let tt = TranspositionTable::new(1);
         let hash = 0x123456789ABCDEF0;
         let mv = Move::new(Square::E2, Square::E4);
 
@@ -230,7 +240,7 @@ mod tests {
 
     #[test]
     fn key_mismatch() {
-        let mut tt = TranspositionTable::new(1);
+        let tt = TranspositionTable::new(1);
         let hash1 = 0xAAAA_0000_0000_0001;
         let hash2 = 0xBBBB_0000_0000_0001; // same index, different key
 
@@ -242,7 +252,7 @@ mod tests {
 
     #[test]
     fn mate_score_adjustment() {
-        let mut tt = TranspositionTable::new(1);
+        let tt = TranspositionTable::new(1);
         let hash = 0x123456789ABCDEF0;
 
         // Store a "mate in 5" from ply 3 (score = MATE_SCORE - 5)
@@ -258,7 +268,7 @@ mod tests {
 
     #[test]
     fn negative_mate_score_adjustment() {
-        let mut tt = TranspositionTable::new(1);
+        let tt = TranspositionTable::new(1);
         let hash = 0x123456789ABCDEF0;
 
         // "Mated in 3" from ply 2
@@ -274,7 +284,7 @@ mod tests {
 
     #[test]
     fn clear_empties_table() {
-        let mut tt = TranspositionTable::new(1);
+        let tt = TranspositionTable::new(1);
         let hash = 0x123456789ABCDEF0;
         tt.store(hash, Move::NULL, 100, 3, Bound::Exact, 0);
         assert!(tt.probe(hash, 0).is_some());
@@ -319,5 +329,75 @@ mod tests {
         let packed = entry.pack();
         let unpacked = TTEntry::unpack(packed);
         assert_eq!(unpacked.score, -32000);
+    }
+
+    /// Stress test: multiple threads concurrently reading and writing the TT.
+    /// Verifies no panics/crashes and that probed entries are internally consistent
+    /// (the verification key mechanism rejects torn reads).
+    #[test]
+    fn concurrent_store_and_probe() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tt = Arc::new(TranspositionTable::new(1));
+        let num_threads = 4;
+        let ops_per_thread = 10_000;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|tid| {
+                let tt = Arc::clone(&tt);
+                thread::spawn(move || {
+                    let mut valid_probes = 0u64;
+                    let mut misses = 0u64;
+
+                    for i in 0..ops_per_thread {
+                        // Each thread writes entries with distinct hashes based on tid
+                        let hash = (tid as u64 * 1_000_000 + i as u64) | ((tid as u64) << 48);
+                        let score = (i % 1000) as i32 - 500;
+                        let depth = (i % 30) as u8;
+                        let mv = Move::new(Square::A1, Square::new((i % 64) as u8));
+                        let bound = match i % 3 {
+                            0 => Bound::Exact,
+                            1 => Bound::Lower,
+                            _ => Bound::Upper,
+                        };
+
+                        tt.store(hash, mv, score, depth, bound, 0);
+
+                        // Immediately try to probe back - may miss due to
+                        // overwrites from other threads, but any hit must be valid
+                        if let Some(entry) = tt.probe(hash, 0) {
+                            // If verification key matches, the data should be consistent:
+                            // the entry we get back was a valid packed entry (not garbage)
+                            assert!(
+                                entry.depth <= 30,
+                                "depth should be in valid range, got {}",
+                                entry.depth
+                            );
+                            assert!(
+                                entry.score >= -32768 && entry.score <= 32767,
+                                "score should be in i16 range"
+                            );
+                            valid_probes += 1;
+                        } else {
+                            misses += 1;
+                        }
+                    }
+                    (valid_probes, misses)
+                })
+            })
+            .collect();
+
+        let mut total_valid = 0u64;
+        for handle in handles {
+            let (valid, _misses) = handle.join().unwrap();
+            total_valid += valid;
+        }
+
+        // At least some probes should succeed (not all will due to hash collisions)
+        assert!(
+            total_valid > 0,
+            "at least some concurrent probes should succeed"
+        );
     }
 }

@@ -6,6 +6,7 @@ use rage_core::Board;
 
 use crate::search::Searcher;
 use crate::time::SearchLimits;
+use crate::tt::TranspositionTable;
 
 /// Default bench depth (matches Stockfish convention).
 pub const DEFAULT_BENCH_DEPTH: u32 = 13;
@@ -66,7 +67,8 @@ pub struct BenchResult {
 /// Run the benchmark: search each position at the given depth, accumulate nodes.
 /// TT is shared across positions (not cleared between them).
 pub fn run_bench(depth: u32) -> BenchResult {
-    let mut searcher = Searcher::new(BENCH_TT_MB);
+    let tt = Arc::new(TranspositionTable::new(BENCH_TT_MB));
+    let mut searcher = Searcher::new(tt);
     let stop = Arc::new(AtomicBool::new(false));
     let limits = SearchLimits {
         depth: Some(depth),

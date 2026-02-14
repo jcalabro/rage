@@ -4,7 +4,8 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use rage_core::Board;
-use rage_search::search::{InfoCallback, Searcher};
+use rage_search::search::InfoCallback;
+use rage_search::threads::ThreadPool;
 use rage_search::time::SearchLimits;
 
 const ENGINE_NAME: &str = "rage";
@@ -12,6 +13,9 @@ const ENGINE_AUTHOR: &str = "jcalabro";
 
 /// Default transposition table size in MB.
 const DEFAULT_HASH_MB: usize = 16;
+
+/// Default number of search threads.
+const DEFAULT_THREADS: usize = 1;
 
 /// Run the UCI protocol loop. Blocks until `quit` is received.
 pub fn run() {
@@ -59,29 +63,29 @@ pub fn run() {
 
 struct UciEngine {
     board: Board,
-    /// None while a search thread owns the searcher.
-    searcher: Option<Searcher>,
+    /// None while a search thread owns the pool.
+    pool: Option<ThreadPool>,
     stop: Arc<AtomicBool>,
-    search_handle: Option<thread::JoinHandle<Searcher>>,
+    search_handle: Option<thread::JoinHandle<ThreadPool>>,
 }
 
 impl UciEngine {
     fn new() -> Self {
         Self {
             board: Board::starting_position(),
-            searcher: Some(Searcher::new(DEFAULT_HASH_MB)),
+            pool: Some(ThreadPool::new(DEFAULT_THREADS, DEFAULT_HASH_MB)),
             stop: Arc::new(AtomicBool::new(false)),
             search_handle: None,
         }
     }
 
-    /// Stop any running search and recover the searcher.
+    /// Stop any running search and recover the pool.
     fn wait_for_search(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.search_handle.take()
-            && let Ok(searcher) = handle.join()
+            && let Ok(pool) = handle.join()
         {
-            self.searcher = Some(searcher);
+            self.pool = Some(pool);
         }
     }
 
@@ -125,6 +129,7 @@ impl UciEngine {
         println!("id author {ENGINE_AUTHOR}");
         println!();
         println!("option name Hash type spin default {DEFAULT_HASH_MB} min 1 max 1024");
+        println!("option name Threads type spin default {DEFAULT_THREADS} min 1 max 256");
         println!("uciok");
     }
 
@@ -134,8 +139,8 @@ impl UciEngine {
 
     fn cmd_ucinewgame(&mut self) {
         self.wait_for_search();
-        if let Some(ref mut searcher) = self.searcher {
-            searcher.tt.clear();
+        if let Some(ref mut pool) = self.pool {
+            pool.clear();
         }
         self.board = Board::starting_position();
     }
@@ -184,7 +189,7 @@ impl UciEngine {
     }
 
     fn cmd_go<'a>(&mut self, tokens: &mut impl Iterator<Item = &'a str>) {
-        // Recover the searcher from any running search
+        // Recover the pool from any running search
         self.wait_for_search();
 
         let mut limits = SearchLimits::default();
@@ -209,10 +214,10 @@ impl UciEngine {
 
         let mut board = self.board.clone();
 
-        // Take the searcher out - search thread owns it temporarily
-        let mut searcher = match self.searcher.take() {
-            Some(s) => s,
-            None => Searcher::new(DEFAULT_HASH_MB),
+        // Take the pool out - search thread owns it temporarily
+        let mut pool = match self.pool.take() {
+            Some(p) => p,
+            None => ThreadPool::new(DEFAULT_THREADS, DEFAULT_HASH_MB),
         };
 
         let handle = thread::spawn(move || {
@@ -237,12 +242,12 @@ impl UciEngine {
                 );
             });
 
-            let result = searcher.search(&mut board, &limits, stop, Some(info_cb));
+            let result = pool.search(&mut board, &limits, stop, Some(info_cb));
             println!("bestmove {}", result.best_move);
             let _ = io::stdout().flush();
 
-            // Return the searcher so the TT is preserved
-            searcher
+            // Return the pool so state is preserved
+            pool
         });
 
         self.search_handle = Some(handle);
@@ -287,13 +292,24 @@ impl UciEngine {
             }
         }
 
-        if name.to_lowercase() == "hash"
-            && let Ok(mb) = value.parse::<usize>()
-        {
-            let mb = mb.clamp(1, 1024);
-            if let Some(ref mut searcher) = self.searcher {
-                searcher.tt.resize(mb);
+        match name.to_lowercase().as_str() {
+            "hash" => {
+                if let Ok(mb) = value.parse::<usize>() {
+                    let mb = mb.clamp(1, 1024);
+                    if let Some(ref mut pool) = self.pool {
+                        pool.resize_tt(mb);
+                    }
+                }
             }
+            "threads" => {
+                if let Ok(n) = value.parse::<usize>() {
+                    let n = n.clamp(1, 256);
+                    if let Some(ref mut pool) = self.pool {
+                        pool.set_num_threads(n);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -580,6 +596,12 @@ mod tests {
     }
 
     #[test]
+    fn setoption_threads() {
+        let mut engine = UciEngine::new();
+        engine.handle_command("setoption name Threads value 4");
+    }
+
+    #[test]
     fn quit_returns_true() {
         let mut engine = UciEngine::new();
         assert!(engine.handle_command("quit"));
@@ -596,9 +618,9 @@ mod tests {
         let mut engine = UciEngine::new();
         engine.handle_command("position startpos");
         engine.handle_command("go depth 3");
-        // Stop the search and recover searcher
+        // Stop the search and recover pool
         engine.handle_command("stop");
-        assert!(engine.searcher.is_some());
+        assert!(engine.pool.is_some());
     }
 
     #[test]
@@ -636,7 +658,7 @@ mod tests {
         // Second search should work fine with preserved TT
         engine.handle_command("go depth 2");
         engine.handle_command("stop");
-        assert!(engine.searcher.is_some());
+        assert!(engine.pool.is_some());
     }
 
     #[test]
@@ -648,8 +670,8 @@ mod tests {
         engine.handle_command("ucinewgame");
         // After ucinewgame, board should be reset
         assert_eq!(engine.board.to_fen(), Board::STARTPOS_FEN);
-        // Searcher should be recovered
-        assert!(engine.searcher.is_some());
+        // Pool should be recovered
+        assert!(engine.pool.is_some());
     }
 
     #[test]
@@ -661,7 +683,7 @@ mod tests {
         // Let it search briefly then stop
         std::thread::sleep(std::time::Duration::from_millis(50));
         engine.handle_command("stop");
-        assert!(engine.searcher.is_some());
+        assert!(engine.pool.is_some());
     }
 
     #[test]

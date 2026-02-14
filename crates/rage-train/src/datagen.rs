@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rage_core::{Board, Color};
 use rage_search::search::Searcher;
 use rage_search::time::SearchLimits;
+use rage_search::tt::TranspositionTable;
 use rand::Rng;
 
 use crate::data::{TrainingEntry, WdlResult};
@@ -78,7 +79,8 @@ pub fn generate_data(config: &DatagenConfig, output_path: &Path) -> std::io::Res
 fn play_game<R: Rng>(config: &DatagenConfig, rng: &mut R) -> Vec<TrainingEntry> {
     let mut board = Board::starting_position();
     let stop = Arc::new(AtomicBool::new(false));
-    let mut searcher = Searcher::new(16); // 16 MB TT
+    let tt = Arc::new(TranspositionTable::new(16));
+    let mut searcher = Searcher::new(tt); // 16 MB TT
 
     // Collected positions (without WDL yet)
     let mut positions: Vec<(TrainingEntry, Color)> = Vec::new();

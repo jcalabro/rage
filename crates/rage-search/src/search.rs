@@ -112,30 +112,32 @@ impl StackEntry {
 
 /// The main search engine.
 pub struct Searcher {
-    pub tt: TranspositionTable,
+    pub tt: Arc<TranspositionTable>,
     killers: Killers,
     history: History,
     counter_moves: CounterMoves,
     stack: [StackEntry; MAX_PLY + 4],
     pv_table: [[Move; MAX_PLY + 1]; MAX_PLY + 1],
     pv_length: [usize; MAX_PLY + 1],
-    nodes: u64,
+    pub nodes: u64,
     seldepth: u32,
     stopped: bool,
     /// NNUE network for evaluation. Falls back to PST eval when None.
     network: Option<Arc<NnueNetwork>>,
     /// Per-ply NNUE accumulators for incremental updates.
     accumulators: Vec<Accumulator>,
+    /// Thread ID for Lazy SMP depth perturbation. 0 = main thread.
+    pub thread_id: usize,
 }
 
 impl Searcher {
-    pub fn new(tt_size_mb: usize) -> Self {
+    pub fn new(tt: Arc<TranspositionTable>) -> Self {
         let mut accumulators = Vec::with_capacity(MAX_PLY + 4);
         for _ in 0..MAX_PLY + 4 {
             accumulators.push(Accumulator::EMPTY);
         }
         Self {
-            tt: TranspositionTable::new(tt_size_mb),
+            tt,
             killers: Killers::new(),
             history: History::new(),
             counter_moves: CounterMoves::new(),
@@ -147,7 +149,21 @@ impl Searcher {
             stopped: false,
             network: None,
             accumulators,
+            thread_id: 0,
         }
+    }
+
+    /// Clear per-thread tables (killers, history, counter moves).
+    /// Does NOT clear the TT (which is shared).
+    pub fn clear_tables(&mut self) {
+        self.killers.clear();
+        self.history = History::new();
+        self.counter_moves = CounterMoves::new();
+    }
+
+    /// Get a reference to the current NNUE network (if any).
+    pub fn network(&self) -> &Option<Arc<NnueNetwork>> {
+        &self.network
     }
 
     /// Set the NNUE network for evaluation.
@@ -236,12 +252,17 @@ impl Searcher {
         let mut stability_count = 0u32;
 
         for depth in 1..=tm.max_depth().min(MAX_PLY as u32) {
+            // Lazy SMP depth perturbation: helper threads add thread_id % 2
+            // so odd-numbered threads search one ply deeper, exploring different
+            // parts of the tree.
+            let search_depth = depth + (self.thread_id % 2) as u32;
+
             self.seldepth = 0;
             let score;
 
-            if depth < 4 {
+            if search_depth < 4 {
                 // Small depths: full window
-                score = self.negamax(board, &mut tm, -INFINITY, INFINITY, depth, 0, false);
+                score = self.negamax(board, &mut tm, -INFINITY, INFINITY, search_depth, 0, false);
             } else {
                 // Aspiration windows
                 let mut delta = ASPIRATION_DELTA;
@@ -251,7 +272,8 @@ impl Searcher {
                 let mut aspiration_score;
 
                 loop {
-                    aspiration_score = self.negamax(board, &mut tm, alpha, beta, depth, 0, false);
+                    aspiration_score =
+                        self.negamax(board, &mut tm, alpha, beta, search_depth, 0, false);
                     if self.stopped {
                         break;
                     }
@@ -988,9 +1010,12 @@ mod tests {
 
     use super::*;
 
+    use crate::tt::TranspositionTable;
+
     fn search_position(fen: &str, depth: u32) -> SearchResult {
         let mut board = Board::from_fen(fen).unwrap();
-        let mut searcher = Searcher::new(16);
+        let tt = Arc::new(TranspositionTable::new(16));
+        let mut searcher = Searcher::new(tt);
         let limits = SearchLimits {
             depth: Some(depth),
             ..Default::default()
@@ -1093,7 +1118,7 @@ mod tests {
     fn early_stop_returns_valid_move() {
         let mut board =
             Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
-        let mut searcher = Searcher::new(16);
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
         let limits = SearchLimits {
             depth: Some(10),
             ..Default::default()
@@ -1147,7 +1172,7 @@ mod tests {
     fn info_callback_called() {
         let mut board =
             Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
-        let mut searcher = Searcher::new(16);
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
         let limits = SearchLimits {
             depth: Some(3),
             ..Default::default()
@@ -1205,7 +1230,7 @@ mod tests {
         let mut board =
             Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
                 .unwrap();
-        let mut searcher = Searcher::new(16);
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
         let limits = SearchLimits {
             depth: Some(4),
             ..Default::default()
@@ -1253,7 +1278,7 @@ mod tests {
         // With quiescence search and check extensions, seldepth should exceed depth
         let mut board =
             Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
-        let mut searcher = Searcher::new(16);
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
         let limits = SearchLimits {
             depth: Some(4),
             ..Default::default()
@@ -1269,7 +1294,7 @@ mod tests {
         // Searching the same position twice should use fewer nodes the second time
         let mut board =
             Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
-        let mut searcher = Searcher::new(16);
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
         let limits = SearchLimits {
             depth: Some(5),
             ..Default::default()
