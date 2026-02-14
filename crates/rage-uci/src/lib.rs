@@ -298,9 +298,8 @@ impl UciEngine {
     // --- Debug commands ---
 
     fn cmd_display(&self) {
-        println!("{}", self.board);
+        print!("{}", self.board);
         println!("FEN: {}", self.board.to_fen());
-        println!("Hash: {:016x}", self.board.zobrist_hash());
     }
 
     fn cmd_display_pretty(&self) {
@@ -337,50 +336,25 @@ impl UciEngine {
             }
         }
 
-        // Collect material for each side
-        let mut white_pieces = Vec::new();
-        let mut black_pieces = Vec::new();
-        for rank in 0..8 {
-            for file in 0..8 {
-                let sq = Square::from_file_rank(File::new(file), Rank::new(rank));
-                if let Some(p) = self.board.piece_on(sq) {
-                    let ch = piece_char(p.piece_type, p.color);
-                    match p.color {
-                        Color::White => white_pieces.push((p.piece_type, ch)),
-                        Color::Black => black_pieces.push((p.piece_type, ch)),
-                    }
-                }
-            }
-        }
-
-        // Sort pieces by value (king, queen, rook, bishop, knight, pawn)
-        fn piece_sort_key(pt: PieceType) -> u8 {
-            match pt {
-                PieceType::King => 0,
-                PieceType::Queen => 1,
-                PieceType::Rook => 2,
-                PieceType::Bishop => 3,
-                PieceType::Knight => 4,
-                PieceType::Pawn => 5,
-            }
-        }
-        white_pieces.sort_by_key(|(pt, _)| piece_sort_key(*pt));
-        black_pieces.sort_by_key(|(pt, _)| piece_sort_key(*pt));
-
         println!();
-
-        // Black material (shown above board)
-        let black_material: String =
-            black_pieces.iter().map(|(_, c)| c.to_string()).collect::<Vec<_>>().join(" ");
-        println!("  {COORD_FG}{black_material}{RESET}");
 
         // Each square is 5 terminal cells wide: "  X  " for pieces, "     " for empty.
         // Prefix is 4 visible chars: "  N " (2 spaces + rank digit + space).
         // File labels are centered under each 5-cell square.
         println!("  {COORD_FG}    a    b    c    d    e    f    g    h{RESET}");
 
-        // Board rows
+        // Board rows — 3 terminal lines per rank for square-ish cells
         for rank in (0..8).rev() {
+            // Top padding row
+            print!("    ");
+            for file in 0..8 {
+                let is_light = (file + rank) % 2 != 0;
+                let bg = if is_light { LIGHT_BG } else { DARK_BG };
+                print!("{bg}     {RESET}");
+            }
+            println!();
+
+            // Middle row: rank label + pieces
             print!("  {COORD_FG}{}{RESET} ", rank + 1);
             for file in 0..8 {
                 let sq = Square::from_file_rank(File::new(file), Rank::new(rank));
@@ -394,22 +368,24 @@ impl UciEngine {
                             Color::Black => BLACK_PC,
                         };
                         let ch = piece_char(p.piece_type, p.color);
-                        // 5 cells: 2 spaces + piece(1 cell) + 2 spaces
                         print!("{bg}{BOLD}{fg}  {ch}  {RESET}");
                     }
-                    // 5 cells: all spaces
                     None => print!("{bg}     {RESET}"),
                 }
             }
             println!(" {COORD_FG}{}{RESET}", rank + 1);
+
+            // Bottom padding row
+            print!("    ");
+            for file in 0..8 {
+                let is_light = (file + rank) % 2 != 0;
+                let bg = if is_light { LIGHT_BG } else { DARK_BG };
+                print!("{bg}     {RESET}");
+            }
+            println!();
         }
 
         println!("  {COORD_FG}    a    b    c    d    e    f    g    h{RESET}");
-
-        // White material (shown below board)
-        let white_material: String =
-            white_pieces.iter().map(|(_, c)| c.to_string()).collect::<Vec<_>>().join(" ");
-        println!("  {COORD_FG}{white_material}{RESET}");
 
         println!();
 
@@ -427,10 +403,7 @@ impl UciEngine {
             self.board.castling_rights(),
             self.board.fullmove_number(),
         );
-        println!(
-            "  {LABEL_FG}{DIM}FEN:{RESET}   {}",
-            self.board.to_fen()
-        );
+        println!("  {LABEL_FG}{DIM}FEN:{RESET}   {}", self.board.to_fen());
         println!(
             "  {LABEL_FG}{DIM}Hash:{RESET}  {:016x}",
             self.board.zobrist_hash()

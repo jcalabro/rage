@@ -741,7 +741,7 @@ impl fmt::Display for Board {
         writeln!(f, "  a b c d e f g h")?;
         writeln!(
             f,
-            "Side: {} | Castling: {} | EP: {} | HM: {} | FM: {}",
+            "\nSide: {} | Castling: {} | EP: {} | HM: {} | FM: {}",
             self.side_to_move,
             self.castling,
             self.en_passant.map_or("-".to_string(), |sq| sq.to_string()),
