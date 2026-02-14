@@ -27,3 +27,4 @@ target
 # Added by cargo
 
 /target
+*.bin
