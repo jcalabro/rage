@@ -180,7 +180,6 @@ mod tests {
     #[test]
     fn test_default_book_valid_fens() {
         use rage_core::Board;
-        let book = OpeningBook::default_book();
         for (i, fen) in DEFAULT_OPENINGS.iter().enumerate() {
             assert!(
                 Board::from_fen(fen).is_ok(),
