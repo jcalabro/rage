@@ -110,6 +110,13 @@ impl ThreadPool {
         self.searchers.first().and_then(|s| s.syzygy().as_ref())
     }
 
+    /// Set the number of principal variations to report (Multi-PV).
+    pub fn set_multi_pv(&mut self, n: usize) {
+        for s in &mut self.searchers {
+            s.multi_pv = n;
+        }
+    }
+
     /// Evaluate the current position with NNUE (if a network is loaded).
     /// Returns `None` if no network is loaded.
     pub fn evaluate_nnue(&mut self, board: &Board) -> Option<i32> {
@@ -193,6 +200,7 @@ impl ThreadPool {
                         pv: info.pv.clone(),
                         hashfull: info.hashfull,
                         tbhits: info.tbhits,
+                        multipv: info.multipv,
                     };
                     cb(&adjusted);
                 });
@@ -230,6 +238,7 @@ fn searchers_copy_settings(existing: &[Searcher], target: &mut Searcher) {
     if let Some(first) = existing.first() {
         target.set_network(first.network().clone());
         target.set_syzygy(first.syzygy().clone());
+        target.multi_pv = first.multi_pv;
     }
 }
 
@@ -562,5 +571,48 @@ mod tests {
             pool.tt.probe(hash, 0).is_none(),
             "TT should be empty after clear"
         );
+    }
+
+    #[test]
+    fn multi_pv_through_thread_pool() {
+        let mut pool = ThreadPool::new(1, 16);
+        pool.set_multi_pv(3);
+
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let limits = SearchLimits {
+            depth: Some(5),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let infos = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let infos_clone = Arc::clone(&infos);
+        let cb: crate::search::InfoCallback = Box::new(move |info| {
+            infos_clone.lock().unwrap().push((
+                info.depth,
+                info.multipv,
+                info.pv.first().map(|m| m.to_string()).unwrap_or_default(),
+            ));
+        });
+
+        let result = pool.search(&mut board, &limits, stop, Some(cb));
+        assert!(!result.best_move.is_null());
+
+        let infos = infos.lock().unwrap();
+        let max_depth = infos.iter().map(|(d, _, _)| *d).max().unwrap_or(0);
+        assert!(max_depth >= 5, "should complete at least depth 5");
+        for depth in 1..=max_depth {
+            let lines: Vec<_> = infos.iter().filter(|(d, _, _)| *d == depth).collect();
+            assert_eq!(
+                lines.len(),
+                3,
+                "depth {depth}: should get 3 PV lines via ThreadPool, got {}",
+                lines.len()
+            );
+            assert_eq!(lines[0].1, 1);
+            assert_eq!(lines[1].1, 2);
+            assert_eq!(lines[2].1, 3);
+        }
     }
 }

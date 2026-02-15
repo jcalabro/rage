@@ -382,6 +382,7 @@ impl RageEngine {
             let _ = js_sys::Reflect::set(&obj, &"pv".into(), &pv.join(" ").into());
             let _ = js_sys::Reflect::set(&obj, &"hashfull".into(), &(info.hashfull).into());
             let _ = js_sys::Reflect::set(&obj, &"tbhits".into(), &(info.tbhits as f64).into());
+            let _ = js_sys::Reflect::set(&obj, &"multipv".into(), &(info.multipv as u32).into());
             let _ = js_fn.call1(&obj);
         }))
     }

@@ -69,6 +69,8 @@ pub struct SearchInfo {
     pub pv: Vec<Move>,
     pub hashfull: u32,
     pub tbhits: u64,
+    /// 1-indexed multi-PV line number (1 for single-PV).
+    pub multipv: usize,
 }
 
 impl SearchInfo {
@@ -135,6 +137,10 @@ pub struct Searcher {
     syzygy: Option<Arc<Tablebase>>,
     /// Thread ID for Lazy SMP depth perturbation. 0 = main thread.
     pub thread_id: usize,
+    /// Number of principal variations to report (Multi-PV). Default 1.
+    pub multi_pv: usize,
+    /// Moves excluded at root during multi-PV iteration.
+    root_excluded: Vec<Move>,
 }
 
 impl Searcher {
@@ -160,6 +166,8 @@ impl Searcher {
             accumulators,
             syzygy: None,
             thread_id: 0,
+            multi_pv: 1,
+            root_excluded: Vec::new(),
         }
     }
 
@@ -282,102 +290,128 @@ impl Searcher {
         let mut prev_best_move = Move::NULL;
         let mut stability_count = 0u32;
 
+        // Count root moves once to cap multi_pv
+        let num_root_moves = board.generate_legal_moves().len();
+        let multi_pv = self.multi_pv.min(num_root_moves).max(1);
+
         for depth in 1..=tm.max_depth().min(MAX_PLY as u32) {
             // Lazy SMP depth perturbation: helper threads add thread_id % 2
             // so odd-numbered threads search one ply deeper, exploring different
             // parts of the tree.
             let search_depth = depth + (self.thread_id % 2) as u32;
 
-            self.seldepth = 0;
-            let score;
+            self.root_excluded.clear();
+            let mut depth_stopped = false;
 
-            if search_depth < 4 {
-                // Small depths: full window
-                score = self.negamax(board, &mut tm, -INFINITY, INFINITY, search_depth, 0, false);
-            } else {
-                // Aspiration windows
-                let mut delta = ASPIRATION_DELTA;
-                let mut alpha = best_score - delta;
-                let mut beta = best_score + delta;
-                let mut fail_count = 0;
-                let mut aspiration_score;
+            for pv_idx in 0..multi_pv {
+                self.seldepth = 0;
+                let score;
 
-                loop {
-                    aspiration_score =
-                        self.negamax(board, &mut tm, alpha, beta, search_depth, 0, false);
+                if pv_idx == 0 && search_depth >= 4 {
+                    // Aspiration windows only for the primary line
+                    let mut delta = ASPIRATION_DELTA;
+                    let mut alpha = best_score - delta;
+                    let mut beta = best_score + delta;
+                    let mut fail_count = 0;
+                    let mut aspiration_score;
+
+                    loop {
+                        aspiration_score =
+                            self.negamax(board, &mut tm, alpha, beta, search_depth, 0, false);
+                        if self.stopped {
+                            break;
+                        }
+
+                        if aspiration_score <= alpha {
+                            // Fail low: widen alpha
+                            alpha = if fail_count >= 2 {
+                                -INFINITY
+                            } else {
+                                (aspiration_score - delta).max(-INFINITY)
+                            };
+                            fail_count += 1;
+                        } else if aspiration_score >= beta {
+                            // Fail high: widen beta
+                            beta = if fail_count >= 2 {
+                                INFINITY
+                            } else {
+                                (aspiration_score + delta).min(INFINITY)
+                            };
+                            fail_count += 1;
+                        } else {
+                            // In window — done
+                            break;
+                        }
+
+                        delta *= 2;
+
+                        if self.stopped {
+                            break;
+                        }
+                    }
+
                     if self.stopped {
+                        depth_stopped = true;
                         break;
                     }
 
-                    if aspiration_score <= alpha {
-                        // Fail low: widen alpha
-                        alpha = if fail_count >= 2 {
-                            -INFINITY
-                        } else {
-                            (aspiration_score - delta).max(-INFINITY)
-                        };
-                        fail_count += 1;
-                    } else if aspiration_score >= beta {
-                        // Fail high: widen beta
-                        beta = if fail_count >= 2 {
-                            INFINITY
-                        } else {
-                            (aspiration_score + delta).min(INFINITY)
-                        };
-                        fail_count += 1;
-                    } else {
-                        // In window — done
-                        break;
-                    }
-
-                    delta *= 2;
+                    score = aspiration_score;
+                } else {
+                    // Full window for small depths or secondary PV lines
+                    score =
+                        self.negamax(board, &mut tm, -INFINITY, INFINITY, search_depth, 0, false);
 
                     if self.stopped {
+                        depth_stopped = true;
                         break;
                     }
                 }
 
-                if self.stopped {
-                    break;
+                // Extract PV from triangular PV table
+                let pv_len = self.pv_length[0];
+                let pv: Vec<Move> = self.pv_table[0][..pv_len].to_vec();
+                let line_best = pv.first().copied().unwrap_or(Move::NULL);
+
+                // For primary line, update overall best move/score
+                if pv_idx == 0 {
+                    best_score = score;
+                    completed_depth = depth;
+                    if !line_best.is_null() {
+                        best_move = line_best;
+                    }
+                    best_pv = pv.clone();
                 }
 
-                score = aspiration_score;
+                // Exclude this line's best move from subsequent PV searches
+                if !line_best.is_null() {
+                    self.root_excluded.push(line_best);
+                }
+
+                if let Some(ref cb) = info_callback {
+                    cb(&SearchInfo {
+                        depth,
+                        seldepth: self.seldepth,
+                        score,
+                        nodes: self.nodes,
+                        time_ms: tm.elapsed_ms(),
+                        pv,
+                        hashfull: self.tt.hashfull(),
+                        tbhits: self.tbhits,
+                        multipv: pv_idx + 1,
+                    });
+                }
             }
 
-            if self.stopped {
+            if depth_stopped {
                 break;
             }
 
-            best_score = score;
-            completed_depth = depth;
-
-            // Extract PV from triangular PV table
-            let pv_len = self.pv_length[0];
-            let pv: Vec<Move> = self.pv_table[0][..pv_len].to_vec();
-            if let Some(&first) = pv.first() {
-                best_move = first;
-            }
-            best_pv = pv;
-
-            // Track best-move stability for time management
+            // Track best-move stability for time management (primary line only)
             if best_move == prev_best_move {
                 stability_count += 1;
             } else {
                 stability_count = 0;
                 prev_best_move = best_move;
-            }
-
-            if let Some(ref cb) = info_callback {
-                cb(&SearchInfo {
-                    depth,
-                    seldepth: self.seldepth,
-                    score: best_score,
-                    nodes: self.nodes,
-                    time_ms: tm.elapsed_ms(),
-                    pv: best_pv.clone(),
-                    hashfull: self.tt.hashfull(),
-                    tbhits: self.tbhits,
-                });
             }
 
             // Don't start a new iteration if soft limit reached
@@ -720,6 +754,11 @@ impl Searcher {
 
             // Skip the excluded move (used during singular extension verification)
             if m == excluded && !excluded.is_null() {
+                continue;
+            }
+
+            // Multi-PV: skip moves already selected by earlier PV lines
+            if is_root && self.root_excluded.contains(&m) {
                 continue;
             }
 
@@ -1447,6 +1486,222 @@ mod tests {
             found_nonzero,
             "cont_history should have non-zero entries after depth-6 search"
         );
+    }
+
+    #[test]
+    fn multi_pv_returns_distinct_moves() {
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
+        searcher.multi_pv = 3;
+        let limits = SearchLimits {
+            depth: Some(6),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let infos = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let infos_clone = Arc::clone(&infos);
+        let cb: InfoCallback = Box::new(move |info| {
+            infos_clone.lock().unwrap().push((
+                info.depth,
+                info.multipv,
+                info.pv.first().copied().unwrap_or(Move::NULL),
+                info.score,
+            ));
+        });
+
+        searcher.search(&mut board, &limits, stop, Some(cb));
+
+        let infos = infos.lock().unwrap();
+        // For each completed depth, check that we got 3 lines with distinct best moves
+        let max_depth = infos.iter().map(|(d, _, _, _)| *d).max().unwrap_or(0);
+        for depth in 1..=max_depth {
+            let lines: Vec<_> = infos.iter().filter(|(d, _, _, _)| *d == depth).collect();
+            assert_eq!(
+                lines.len(),
+                3,
+                "depth {depth} should have 3 PV lines, got {}",
+                lines.len()
+            );
+            // Check multipv indices are 1, 2, 3
+            assert_eq!(lines[0].1, 1);
+            assert_eq!(lines[1].1, 2);
+            assert_eq!(lines[2].1, 3);
+            // All best moves should be distinct
+            let m1 = lines[0].2;
+            let m2 = lines[1].2;
+            let m3 = lines[2].2;
+            assert_ne!(m1, m2, "depth {depth}: PV 1 and 2 should differ");
+            assert_ne!(m1, m3, "depth {depth}: PV 1 and 3 should differ");
+            assert_ne!(m2, m3, "depth {depth}: PV 2 and 3 should differ");
+        }
+    }
+
+    #[test]
+    fn multi_pv_scores_reasonably_close() {
+        // Strict score ordering (PV1 >= PV2 >= PV3) is NOT guaranteed because
+        // TT entries from earlier PV lines can alter pruning in later ones.
+        // This is accepted behavior in all multi-PV engines.
+        // Instead, verify that secondary line scores don't wildly exceed the
+        // primary line, which would indicate broken exclusion logic.
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
+        searcher.multi_pv = 4;
+        let limits = SearchLimits {
+            depth: Some(5),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let infos = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let infos_clone = Arc::clone(&infos);
+        let cb: InfoCallback = Box::new(move |info| {
+            infos_clone
+                .lock()
+                .unwrap()
+                .push((info.depth, info.multipv, info.score));
+        });
+
+        searcher.search(&mut board, &limits, stop, Some(cb));
+
+        let infos = infos.lock().unwrap();
+        let max_depth = infos.iter().map(|(d, _, _)| *d).max().unwrap_or(0);
+        for depth in 1..=max_depth {
+            let mut scores: Vec<_> = infos
+                .iter()
+                .filter(|(d, _, _)| *d == depth)
+                .map(|(_, mpv, score)| (*mpv, *score))
+                .collect();
+            scores.sort_by_key(|(mpv, _)| *mpv);
+            let primary_score = scores[0].1;
+            for &(mpv, score) in &scores[1..] {
+                assert!(
+                    score <= primary_score + 200,
+                    "depth {depth}: PV {mpv} score ({score}) should not wildly exceed \
+                     PV 1 score ({primary_score}) — indicates broken exclusion logic",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multi_pv_single_legal_move() {
+        // Black king on h8, white queen on g6, white king on f6 — only Kh8-g8 is impossible
+        // because g7 is controlled. Actually, let's use a simpler forced-move position:
+        // King on a1 in check from rook on a3 with black king on c3 — only move is Kb1
+        // (Ka2 attacked by rook, Kb2 attacked by king)
+        let mut board = Board::from_fen("8/8/8/8/8/r1k5/8/K7 w - - 0 1").unwrap();
+        assert_eq!(
+            board.generate_legal_moves().len(),
+            1,
+            "position should have exactly 1 legal move"
+        );
+
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
+        searcher.multi_pv = 3;
+        let limits = SearchLimits {
+            depth: Some(4),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let infos = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let infos_clone = Arc::clone(&infos);
+        let cb: InfoCallback = Box::new(move |info| {
+            infos_clone.lock().unwrap().push((info.depth, info.multipv));
+        });
+
+        let result = searcher.search(&mut board, &limits, stop, Some(cb));
+        assert!(!result.best_move.is_null());
+
+        let infos = infos.lock().unwrap();
+        let max_depth = infos.iter().map(|(d, _)| *d).max().unwrap_or(0);
+        for depth in 1..=max_depth {
+            let lines: Vec<_> = infos.iter().filter(|(d, _)| *d == depth).collect();
+            assert_eq!(
+                lines.len(),
+                1,
+                "depth {depth}: only 1 legal move, should get 1 PV line, got {}",
+                lines.len()
+            );
+            assert_eq!(lines[0].1, 1);
+        }
+    }
+
+    #[test]
+    fn multi_pv_capped_by_legal_moves() {
+        // Position with exactly 2 legal moves: Ka1 with Kc3 — only Ka2 and Kb1
+        let mut board = Board::from_fen("8/8/8/8/8/2k5/8/K7 w - - 0 1").unwrap();
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
+        searcher.multi_pv = 3; // request 3, but only 2 moves exist
+        let limits = SearchLimits {
+            depth: Some(6),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let infos = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let infos_clone = Arc::clone(&infos);
+        let cb: InfoCallback = Box::new(move |info| {
+            infos_clone.lock().unwrap().push((
+                info.depth,
+                info.multipv,
+                info.pv.first().copied().unwrap_or(Move::NULL),
+            ));
+        });
+
+        searcher.search(&mut board, &limits, stop, Some(cb));
+
+        let infos = infos.lock().unwrap();
+        let max_depth = infos.iter().map(|(d, _, _)| *d).max().unwrap_or(0);
+        for depth in 1..=max_depth {
+            let lines: Vec<_> = infos.iter().filter(|(d, _, _)| *d == depth).collect();
+            // Should get exactly 2 lines, not 3
+            assert_eq!(
+                lines.len(),
+                2,
+                "depth {depth}: only 2 legal moves, should get 2 PV lines, got {}",
+                lines.len()
+            );
+            assert_eq!(lines[0].1, 1);
+            assert_eq!(lines[1].1, 2);
+            // The two moves should be distinct
+            assert_ne!(
+                lines[0].2, lines[1].2,
+                "depth {depth}: the 2 PV lines should have different best moves"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_pv_one_is_default() {
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let mut searcher = Searcher::new(Arc::new(TranspositionTable::new(16)));
+        // multi_pv defaults to 1
+        assert_eq!(searcher.multi_pv, 1);
+
+        let limits = SearchLimits {
+            depth: Some(4),
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let infos = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let infos_clone = Arc::clone(&infos);
+        let cb: InfoCallback = Box::new(move |info| {
+            infos_clone.lock().unwrap().push(info.multipv);
+        });
+
+        searcher.search(&mut board, &limits, stop, Some(cb));
+
+        let infos = infos.lock().unwrap();
+        // Every callback should report multipv = 1
+        for &mpv in infos.iter() {
+            assert_eq!(mpv, 1, "single-PV should always report multipv=1");
+        }
     }
 
     #[test]

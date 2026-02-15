@@ -86,6 +86,8 @@ struct UciEngine {
     syzygy_probe_depth: u32,
     /// Maximum pieces for tablebase probing.
     syzygy_probe_limit: u32,
+    /// Number of principal variations to report. Default 1.
+    multi_pv: usize,
 }
 
 impl UciEngine {
@@ -117,6 +119,7 @@ impl UciEngine {
             syzygy_path,
             syzygy_probe_depth: 1,
             syzygy_probe_limit: 7,
+            multi_pv: 1,
         }
     }
 
@@ -225,6 +228,7 @@ impl UciEngine {
         println!();
         println!("option name Hash type spin default {DEFAULT_HASH_MB} min 1 max 1024");
         println!("option name Threads type spin default {DEFAULT_THREADS} min 1 max 256");
+        println!("option name MultiPV type spin default 1 min 1 max 32");
         println!("option name Ponder type check default true");
         println!("option name EvalFile type string default <empty>");
         println!("option name SyzygyPath type string default <empty>");
@@ -337,8 +341,9 @@ impl UciEngine {
             None => ThreadPool::new(DEFAULT_THREADS, DEFAULT_HASH_MB),
         };
 
+        let multi_pv = self.multi_pv;
         let handle = thread::spawn(move || {
-            let info_cb: InfoCallback = Box::new(|info| {
+            let info_cb: InfoCallback = Box::new(move |info| {
                 let pv_str: String = info
                     .pv
                     .iter()
@@ -351,11 +356,17 @@ impl UciEngine {
                 } else {
                     String::new()
                 };
+                let mpv_str = if multi_pv > 1 {
+                    format!(" multipv {}", info.multipv)
+                } else {
+                    String::new()
+                };
                 println!(
-                    "info depth {} seldepth {} score {} nodes {} nps {} time {} hashfull {}{} pv {}",
+                    "info depth {} seldepth {} score {}{} nodes {} nps {} time {} hashfull {}{} pv {}",
                     info.depth,
                     info.seldepth,
                     info.score_string(),
+                    mpv_str,
                     info.nodes,
                     info.nps(),
                     info.time_ms,
@@ -454,6 +465,14 @@ impl UciEngine {
                     let n = n.clamp(1, 256);
                     if let Some(ref mut pool) = self.pool {
                         pool.set_num_threads(n);
+                    }
+                }
+            }
+            "multipv" => {
+                if let Ok(n) = value.parse::<usize>() {
+                    self.multi_pv = n.clamp(1, 32);
+                    if let Some(ref mut pool) = self.pool {
+                        pool.set_multi_pv(self.multi_pv);
                     }
                 }
             }
@@ -707,6 +726,7 @@ impl UciEngine {
         println!("Options:");
         println!("  Hash <MB>      Transposition table size (1-1024, default {DEFAULT_HASH_MB})");
         println!("  Threads <N>    Number of search threads (1-256, default {DEFAULT_THREADS})");
+        println!("  MultiPV <N>    Number of principal variations (1-32, default 1)");
         println!("  EvalFile <path> Load NNUE network from file (empty to clear)");
         println!("  SyzygyPath <path> Path to Syzygy tablebases (colon-separated)");
         println!("  SyzygyProbeDepth <N> Min depth for TB probing (1-100, default 1)");
@@ -807,6 +827,19 @@ mod tests {
     fn setoption_hash() {
         let mut engine = UciEngine::new(None, None);
         engine.handle_command("setoption name Hash value 32");
+    }
+
+    #[test]
+    fn setoption_multipv() {
+        let mut engine = UciEngine::new(None, None);
+        assert_eq!(engine.multi_pv, 1);
+        engine.handle_command("setoption name MultiPV value 3");
+        assert_eq!(engine.multi_pv, 3);
+        // Clamped to valid range
+        engine.handle_command("setoption name MultiPV value 0");
+        assert_eq!(engine.multi_pv, 1);
+        engine.handle_command("setoption name MultiPV value 999");
+        assert_eq!(engine.multi_pv, 32);
     }
 
     #[test]
