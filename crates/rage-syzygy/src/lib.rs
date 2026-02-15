@@ -29,8 +29,12 @@ mod probe;
 mod table;
 #[cfg(not(target_arch = "wasm32"))]
 mod tablebase;
+#[cfg(not(target_arch = "wasm32"))]
+mod embedded;
 
 // Re-exports for non-wasm
+#[cfg(not(target_arch = "wasm32"))]
+pub use embedded::extract_embedded_tables;
 #[cfg(not(target_arch = "wasm32"))]
 pub use probe::{Dtz, Wdl, filter_root_moves, probe_dtz, probe_wdl, wdl_to_score};
 #[cfg(not(target_arch = "wasm32"))]
@@ -46,6 +50,11 @@ pub use wasm_stub::*;
 #[cfg(target_arch = "wasm32")]
 mod wasm_stub {
     use rage_core::{Board, Move};
+    use std::path::PathBuf;
+
+    pub fn extract_embedded_tables() -> Option<PathBuf> {
+        None
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
     pub enum Wdl {

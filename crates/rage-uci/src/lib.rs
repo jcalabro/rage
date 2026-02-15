@@ -94,6 +94,12 @@ impl UciEngine {
         if let Some(net) = network {
             pool.set_network(Some(net));
         }
+
+        // Use explicit path, or fall back to embedded 3+4 piece tables.
+        let syzygy_path = syzygy_path.or_else(|| {
+            rage_syzygy::extract_embedded_tables().map(|p| p.to_string_lossy().into_owned())
+        });
+
         if let Some(ref path) = syzygy_path {
             let tb = Arc::new(Tablebase::new(path));
             if tb.is_available() {
