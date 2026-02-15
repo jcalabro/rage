@@ -4479,6 +4479,7 @@ dependencies = [
 name = "rage-wasm"
 version = "0.1.0"
 dependencies = [
+ "js-sys",
  "rage-core",
  "rage-nnue",
  "rage-search",

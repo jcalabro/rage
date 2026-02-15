@@ -8,9 +8,23 @@ use wasm_bindgen::prelude::*;
 use rage_core::{Board, Move, Square};
 use rage_nnue::{NnueNetwork, NnueWeights};
 use rage_search::eval::MATE_SCORE;
-use rage_search::search::Searcher;
+use rage_search::search::{InfoCallback, Searcher};
 use rage_search::time::SearchLimits;
 use rage_search::tt::TranspositionTable;
+
+/// Wrapper around `js_sys::Function` that implements `Send`.
+///
+// SAFETY: wasm32 is single-threaded — there are no other threads to send to.
+struct SendFunction(js_sys::Function);
+
+// SAFETY: wasm is single-threaded; this value never crosses a thread boundary.
+unsafe impl Send for SendFunction {}
+
+impl SendFunction {
+    fn call1(&self, arg: &JsValue) -> Result<JsValue, JsValue> {
+        self.0.call1(&JsValue::NULL, arg)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // RageBoard — standalone chess library (no search)
@@ -170,6 +184,32 @@ impl RageBoard {
     pub fn zobrist_hash(&self) -> String {
         format!("{:016x}", self.board.zobrist_hash())
     }
+
+    /// Run perft (performance test) to the given depth. Returns the node count.
+    pub fn perft(&mut self, depth: u32) -> f64 {
+        rage_core::perft(&mut self.board, depth) as f64
+    }
+
+    /// Returns the castling rights as a string (e.g. "KQkq", "Kq", "-").
+    #[wasm_bindgen(js_name = castlingRights)]
+    pub fn castling_rights(&self) -> String {
+        format!("{}", self.board.castling_rights())
+    }
+
+    /// Returns the number of half-moves (plies) played from the starting position.
+    #[wasm_bindgen(js_name = plyCount)]
+    pub fn ply_count(&self) -> usize {
+        self.move_stack.len()
+    }
+
+    /// Deep clone this board, preserving undo history.
+    #[wasm_bindgen(js_name = clone)]
+    pub fn clone_board(&self) -> Self {
+        Self {
+            board: self.board.clone(),
+            move_stack: self.move_stack.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +222,7 @@ pub struct RageEngine {
     board: Board,
     searcher: Searcher,
     network: Option<Arc<NnueNetwork>>,
+    info_callback: Option<js_sys::Function>,
 }
 
 #[wasm_bindgen]
@@ -195,6 +236,7 @@ impl RageEngine {
             board: Board::starting_position(),
             searcher,
             network: None,
+            info_callback: None,
         }
     }
 
@@ -232,6 +274,21 @@ impl RageEngine {
         Ok(())
     }
 
+    /// Register a callback that is invoked after each search iteration.
+    /// The callback receives a single object argument with fields:
+    /// `{ depth, seldepth, score, nodes, timeMs, pv, hashfull, tbhits }`.
+    /// Pass `null` or call `clearSearchInfo()` to remove the callback.
+    #[wasm_bindgen(js_name = onSearchInfo)]
+    pub fn on_search_info(&mut self, callback: js_sys::Function) {
+        self.info_callback = Some(callback);
+    }
+
+    /// Remove the search info callback.
+    #[wasm_bindgen(js_name = clearSearchInfo)]
+    pub fn clear_search_info(&mut self) {
+        self.info_callback = None;
+    }
+
     /// Search to a fixed depth. Returns a `WasmSearchResult`.
     #[wasm_bindgen(js_name = searchDepth)]
     pub fn search_depth(&mut self, depth: u32) -> WasmSearchResult {
@@ -239,9 +296,7 @@ impl RageEngine {
             depth: Some(depth),
             ..Default::default()
         };
-        let stop = Arc::new(AtomicBool::new(false));
-        let result = self.searcher.search(&mut self.board, &limits, stop, None);
-        WasmSearchResult::from_result(&result)
+        self.run_search(&limits)
     }
 
     /// Search for a fixed time in milliseconds. Returns a `WasmSearchResult`.
@@ -251,9 +306,17 @@ impl RageEngine {
             movetime: Some(ms),
             ..Default::default()
         };
-        let stop = Arc::new(AtomicBool::new(false));
-        let result = self.searcher.search(&mut self.board, &limits, stop, None);
-        WasmSearchResult::from_result(&result)
+        self.run_search(&limits)
+    }
+
+    /// Search with a node limit. Returns a `WasmSearchResult`.
+    #[wasm_bindgen(js_name = searchNodes)]
+    pub fn search_nodes(&mut self, nodes: f64) -> WasmSearchResult {
+        let limits = SearchLimits {
+            nodes: Some(nodes as u64),
+            ..Default::default()
+        };
+        self.run_search(&limits)
     }
 
     /// Static NNUE evaluation of the current position.
@@ -293,6 +356,34 @@ impl RageEngine {
     pub fn new_game(&mut self) {
         self.searcher.clear_tables();
         self.board = Board::starting_position();
+    }
+}
+
+impl RageEngine {
+    /// Shared search logic: builds info callback from stored JS function and runs search.
+    fn run_search(&mut self, limits: &SearchLimits) -> WasmSearchResult {
+        let stop = Arc::new(AtomicBool::new(false));
+        let cb = self.make_info_callback();
+        let result = self.searcher.search(&mut self.board, limits, stop, cb);
+        WasmSearchResult::from_result(&result)
+    }
+
+    /// Convert the stored JS callback into a Rust `InfoCallback`, if set.
+    fn make_info_callback(&self) -> Option<InfoCallback> {
+        let js_fn = SendFunction(self.info_callback.clone()?);
+        Some(Box::new(move |info| {
+            let obj = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&obj, &"depth".into(), &(info.depth).into());
+            let _ = js_sys::Reflect::set(&obj, &"seldepth".into(), &(info.seldepth).into());
+            let _ = js_sys::Reflect::set(&obj, &"score".into(), &(info.score).into());
+            let _ = js_sys::Reflect::set(&obj, &"nodes".into(), &(info.nodes as f64).into());
+            let _ = js_sys::Reflect::set(&obj, &"timeMs".into(), &(info.time_ms as f64).into());
+            let pv: Vec<String> = info.pv.iter().map(|m| m.to_string()).collect();
+            let _ = js_sys::Reflect::set(&obj, &"pv".into(), &pv.join(" ").into());
+            let _ = js_sys::Reflect::set(&obj, &"hashfull".into(), &(info.hashfull).into());
+            let _ = js_sys::Reflect::set(&obj, &"tbhits".into(), &(info.tbhits as f64).into());
+            let _ = js_fn.call1(&obj);
+        }))
     }
 }
 

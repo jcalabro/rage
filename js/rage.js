@@ -16,6 +16,7 @@
  *   // Engine with search:
  *   const engine = rage.createEngine({ hashMb: 16 });
  *   await engine.loadWeights('./models/lite.nnue');
+ *   engine.onSearchInfo(info => console.log(`depth ${info.depth} score ${info.score}`));
  *   const result = engine.search({ depth: 10 });
  *   console.log(result.bestMove, result.score);
  */
@@ -109,6 +110,16 @@ export class Board {
     return this.#inner.fullmoveNumber();
   }
 
+  /** Castling rights as a string (e.g. "KQkq", "Kq", "-"). */
+  get castlingRights() {
+    return this.#inner.castlingRights();
+  }
+
+  /** Number of half-moves (plies) played from the starting position. */
+  get plyCount() {
+    return this.#inner.plyCount();
+  }
+
   /**
    * Get legal moves as an array of UCI strings.
    * @returns {string[]}
@@ -185,11 +196,20 @@ export class Board {
   }
 
   /**
-   * Clone the board (via FEN round-trip).
+   * Run perft (performance test move generation) to the given depth.
+   * @param {number} depth
+   * @returns {number} Node count
+   */
+  perft(depth) {
+    return this.#inner.perft(depth);
+  }
+
+  /**
+   * Deep clone this board, preserving full undo history.
    * @returns {Board}
    */
   clone() {
-    return new Board(this.#wasm.RageBoard.fromFen(this.fen), this.#wasm);
+    return new Board(this.#inner.clone(), this.#wasm);
   }
 
   /** Zobrist hash as a hex string. */
@@ -280,8 +300,27 @@ export class Engine {
   }
 
   /**
+   * Register a callback invoked after each completed search iteration.
+   * @param {function} callback - Receives `{ depth, seldepth, score, nodes, timeMs, pv, hashfull, tbhits }`
+   * @returns {Engine} this (chainable)
+   */
+  onSearchInfo(callback) {
+    this.#inner.onSearchInfo(callback);
+    return this;
+  }
+
+  /**
+   * Remove the search info callback.
+   * @returns {Engine} this (chainable)
+   */
+  clearSearchInfo() {
+    this.#inner.clearSearchInfo();
+    return this;
+  }
+
+  /**
    * Search the current position.
-   * @param {{ depth?: number, timeMs?: number }} opts
+   * @param {{ depth?: number, timeMs?: number, nodes?: number }} opts
    * @returns {{ bestMove: string, score: number, depth: number, nodes: number, pv: string, isMate: boolean, mateIn: number }}
    */
   search(opts) {
@@ -290,6 +329,8 @@ export class Engine {
       result = this.#inner.searchDepth(opts.depth);
     } else if (opts?.timeMs != null) {
       result = this.#inner.searchTime(opts.timeMs);
+    } else if (opts?.nodes != null) {
+      result = this.#inner.searchNodes(opts.nodes);
     } else {
       result = this.#inner.searchDepth(10);
     }
