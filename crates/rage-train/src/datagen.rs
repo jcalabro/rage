@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rage_core::{Board, Color};
+use rage_nnue::NnueNetwork;
 use rage_search::search::Searcher;
 use rage_search::time::SearchLimits;
 use rage_search::tt::TranspositionTable;
@@ -27,6 +28,8 @@ pub struct DatagenConfig {
     pub max_plies: u32,
     /// Number of threads for parallel game generation.
     pub threads: usize,
+    /// Optional NNUE network for evaluation (None = PST-only eval).
+    pub network: Option<Arc<NnueNetwork>>,
 }
 
 impl Default for DatagenConfig {
@@ -38,6 +41,7 @@ impl Default for DatagenConfig {
             adjudication_score: 3000,
             max_plies: 400,
             threads: 0, // 0 = use all available cores
+            network: None,
         }
     }
 }
@@ -77,7 +81,7 @@ pub fn generate_data(config: &DatagenConfig, output_path: &Path) -> std::io::Res
             .into_par_iter()
             .map(|_| {
                 let mut rng = rand::thread_rng();
-                let positions = play_game(config, &mut rng);
+                let positions = play_game(config, config.network.clone(), &mut rng);
 
                 let done = games_completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if done.is_multiple_of(100) || done == config.num_games {
@@ -112,11 +116,16 @@ pub fn generate_data(config: &DatagenConfig, output_path: &Path) -> std::io::Res
 }
 
 /// Play a single self-play game and collect training entries.
-fn play_game<R: Rng>(config: &DatagenConfig, rng: &mut R) -> Vec<TrainingEntry> {
+fn play_game<R: Rng>(
+    config: &DatagenConfig,
+    network: Option<Arc<NnueNetwork>>,
+    rng: &mut R,
+) -> Vec<TrainingEntry> {
     let mut board = Board::starting_position();
     let stop = Arc::new(AtomicBool::new(false));
     let tt = Arc::new(TranspositionTable::new(16));
     let mut searcher = Searcher::new(tt); // 16 MB TT
+    searcher.set_network(network);
 
     // Collected positions (without WDL yet)
     let mut positions: Vec<(TrainingEntry, Color)> = Vec::new();

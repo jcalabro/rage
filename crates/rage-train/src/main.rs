@@ -7,9 +7,11 @@ mod model;
 mod quantize;
 mod train;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use rage_nnue::{NnueNetwork, NnueWeights};
 
 /// NNUE training pipeline for the Rage chess engine.
 #[derive(Parser)]
@@ -38,6 +40,9 @@ enum Command {
         /// Number of threads (0 = all available cores).
         #[arg(short, long, default_value_t = 0)]
         threads: usize,
+        /// Path to NNUE weights file for evaluation (omit for PST-only eval).
+        #[arg(long)]
+        evalfile: Option<PathBuf>,
     },
     /// Train the NNUE network.
     Train {
@@ -78,12 +83,20 @@ fn main() {
             depth,
             random_plies,
             threads,
+            evalfile,
         } => {
+            let network = evalfile.map(|path| {
+                let weights = NnueWeights::from_file(Path::new(&path))
+                    .unwrap_or_else(|e| panic!("failed to load NNUE weights from {}: {e}", path.display()));
+                eprintln!("info string loaded NNUE network from {}", path.display());
+                Arc::new(NnueNetwork::new(weights))
+            });
             let config = datagen::DatagenConfig {
                 num_games: games,
                 depth,
                 random_plies,
                 threads,
+                network,
                 ..Default::default()
             };
             match datagen::generate_data(&config, &output) {
