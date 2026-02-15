@@ -306,6 +306,19 @@ impl MatchStats {
     }
 }
 
+/// Live game state streamed from worker threads to TUI for board display.
+#[derive(Debug, Clone)]
+pub struct LiveGameState {
+    pub fen: String,
+    pub last_move: Option<String>,
+    pub move_number: u16,
+    pub score_cp: Option<i32>,
+    pub is_mate_score: bool,
+    pub white_name: String,
+    pub black_name: String,
+    pub ply: u32,
+}
+
 /// Configuration for search limits (alternative to time control).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SearchOverrides {

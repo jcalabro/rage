@@ -1,13 +1,14 @@
 //! SPRT (Sequential Probability Ratio Test) orchestration.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::manager::{self, MatchMode};
 use crate::opening::OpeningBook;
 use crate::stats;
-use crate::types::{MatchStats, PairResult, SprtConfig, SprtDecision};
+use crate::types::{LiveGameState, MatchStats, PairResult, SprtConfig, SprtDecision};
 
 /// Live progress snapshot for TUI rendering.
 #[derive(Debug, Clone)]
@@ -45,6 +46,7 @@ pub fn run_sprt(
     book: &mut OpeningBook,
     stop: Arc<AtomicBool>,
     progress_cb: impl Fn(&SprtProgress) + Send + Sync + 'static,
+    live_state: Option<Arc<Mutex<LiveGameState>>>,
 ) -> SprtReport {
     let (lower_bound, upper_bound) = stats::sprt_bounds(config.alpha, config.beta);
     let start = Instant::now();
@@ -99,6 +101,7 @@ pub fn run_sprt(
         book,
         stop,
         callback,
+        live_state,
     );
 
     // Final report

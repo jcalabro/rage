@@ -103,6 +103,7 @@ pub fn run_tournament(
             book,
             match_stop,
             callback,
+            None,
         );
 
         let Ok(s) = stats.lock() else {

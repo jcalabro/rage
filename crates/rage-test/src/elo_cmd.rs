@@ -4,13 +4,14 @@
 //! with confidence intervals.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use crate::manager::{self, MatchMode};
 use crate::opening::OpeningBook;
 use crate::stats;
-use crate::types::{EloConfig, MatchStats, PairResult};
+use crate::types::{EloConfig, LiveGameState, MatchStats, PairResult};
 
 /// Live progress snapshot for TUI rendering.
 #[derive(Debug, Clone)]
@@ -38,6 +39,7 @@ pub fn run_elo_test(
     book: &mut OpeningBook,
     stop: Arc<AtomicBool>,
     progress_cb: impl Fn(&EloProgress) + Send + Sync + 'static,
+    live_state: Option<Arc<Mutex<LiveGameState>>>,
 ) -> EloReport {
     let start = Instant::now();
     let stats = Arc::new(std::sync::Mutex::new(MatchStats::default()));
@@ -77,6 +79,7 @@ pub fn run_elo_test(
         book,
         stop,
         callback,
+        live_state,
     );
 
     let Ok(s) = stats.lock() else {

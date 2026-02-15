@@ -4,13 +4,14 @@
 //! two engine instances and plays game pairs from a shared opening book.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::game::play_game;
 use crate::opening::OpeningBook;
-use crate::types::{MatchConfig, PairResult};
+use crate::types::{LiveGameState, MatchConfig, PairResult};
 use crate::uci::UciEngine;
 
 /// How many pairs to play.
@@ -35,6 +36,7 @@ pub fn run_match(
     book: &OpeningBook,
     stop: Arc<AtomicBool>,
     on_pair: PairCallback,
+    live_state: Option<Arc<Mutex<LiveGameState>>>,
 ) -> Vec<PairResult> {
     let concurrency = config.concurrency.max(1) as usize;
     let total_pairs = match mode {
@@ -57,6 +59,7 @@ pub fn run_match(
         let result_tx = result_tx.clone();
         let book_fens: Vec<String> = (0..book.len()).map(|i| book.get(i).to_string()).collect();
         let book_len = book.len();
+        let live_state = live_state.clone();
 
         let handle = std::thread::spawn(move || {
             worker_loop(
@@ -67,6 +70,7 @@ pub fn run_match(
                 &pair_counter,
                 &stop,
                 &result_tx,
+                live_state.as_deref(),
             );
         });
         handles.push(handle);
@@ -90,6 +94,7 @@ pub fn run_match(
     results
 }
 
+#[allow(clippy::too_many_arguments)]
 fn worker_loop(
     config: &MatchConfig,
     book_fens: &[String],
@@ -98,6 +103,7 @@ fn worker_loop(
     pair_counter: &AtomicUsize,
     stop: &AtomicBool,
     result_tx: &mpsc::Sender<PairResult>,
+    live_state: Option<&Mutex<LiveGameState>>,
 ) {
     let engine_timeout = Duration::from_secs(30);
 
@@ -158,8 +164,16 @@ fn worker_loop(
         let _ = engine_a.new_game(engine_timeout);
         let _ = engine_b.new_game(engine_timeout);
 
+        // Set engine names in live state for display
+        if let Some(ls) = live_state
+            && let Ok(mut state) = ls.lock()
+        {
+            state.white_name = config.engine_a.display_name();
+            state.black_name = config.engine_b.display_name();
+        }
+
         // Game 1: A=white, B=black
-        let game_a_white = play_game(&mut engine_a, &mut engine_b, fen, config, true);
+        let game_a_white = play_game(&mut engine_a, &mut engine_b, fen, config, true, live_state);
 
         if stop.load(Ordering::Relaxed) {
             break;
@@ -168,7 +182,16 @@ fn worker_loop(
         // Game 2: A=black, B=white (same opening)
         let _ = engine_a.new_game(engine_timeout);
         let _ = engine_b.new_game(engine_timeout);
-        let game_a_black = play_game(&mut engine_b, &mut engine_a, fen, config, false);
+
+        // Update names for reversed colors
+        if let Some(ls) = live_state
+            && let Ok(mut state) = ls.lock()
+        {
+            state.white_name = config.engine_b.display_name();
+            state.black_name = config.engine_a.display_name();
+        }
+
+        let game_a_black = play_game(&mut engine_b, &mut engine_a, fen, config, false, live_state);
 
         let pair = PairResult {
             opening_index: opening_idx,

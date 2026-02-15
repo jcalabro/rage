@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand};
@@ -446,7 +447,22 @@ fn run_sprt_tui(
     stop: Arc<AtomicBool>,
     config_lines: Vec<String>,
 ) {
-    let tui_result = tui::SprtTui::new(Arc::clone(&stop), config_lines);
+    let live_state = Arc::new(Mutex::new(LiveGameState {
+        fen: String::new(),
+        last_move: None,
+        move_number: 0,
+        score_cp: None,
+        is_mate_score: false,
+        white_name: String::new(),
+        black_name: String::new(),
+        ply: 0,
+    }));
+
+    let tui_result = tui::SprtTui::new(
+        Arc::clone(&stop),
+        config_lines,
+        Some(Arc::clone(&live_state)),
+    );
     let mut sprt_tui = match tui_result {
         Ok(t) => t,
         Err(e) => {
@@ -475,6 +491,7 @@ fn run_sprt_tui(
                     *guard = Some(progress.clone());
                 }
             },
+            Some(live_state),
         )
     });
 
@@ -503,11 +520,17 @@ fn run_sprt_tui(
 
 fn run_sprt_plain(config: &SprtConfig, book: &mut OpeningBook, stop: Arc<AtomicBool>) {
     let plain = std::sync::Mutex::new(tui::PlainProgress::new());
-    let report = sprt::run_sprt(config, book, stop, move |progress| {
-        if let Ok(mut p) = plain.lock() {
-            p.print_sprt_progress(progress);
-        }
-    });
+    let report = sprt::run_sprt(
+        config,
+        book,
+        stop,
+        move |progress| {
+            if let Ok(mut p) = plain.lock() {
+                p.print_sprt_progress(progress);
+            }
+        },
+        None,
+    );
     tui::print_sprt_summary(&report);
 
     if let Ok(db_result) = ResultsDb::open_default() {
@@ -529,7 +552,22 @@ fn run_elo_tui(
     stop: Arc<AtomicBool>,
     config_lines: Vec<String>,
 ) {
-    let tui_result = tui::EloTui::new(Arc::clone(&stop), config_lines);
+    let live_state = Arc::new(Mutex::new(LiveGameState {
+        fen: String::new(),
+        last_move: None,
+        move_number: 0,
+        score_cp: None,
+        is_mate_score: false,
+        white_name: String::new(),
+        black_name: String::new(),
+        ply: 0,
+    }));
+
+    let tui_result = tui::EloTui::new(
+        Arc::clone(&stop),
+        config_lines,
+        Some(Arc::clone(&live_state)),
+    );
     let mut elo_tui = match tui_result {
         Ok(t) => t,
         Err(e) => {
@@ -556,6 +594,7 @@ fn run_elo_tui(
                     *guard = Some(progress.clone());
                 }
             },
+            Some(live_state),
         )
     });
 
@@ -580,11 +619,17 @@ fn run_elo_tui(
 
 fn run_elo_plain(config: &EloConfig, book: &mut OpeningBook, stop: Arc<AtomicBool>) {
     let plain = std::sync::Mutex::new(tui::PlainProgress::new());
-    let report = elo_cmd::run_elo_test(config, book, stop, move |progress| {
-        if let Ok(mut p) = plain.lock() {
-            p.print_elo_progress(progress);
-        }
-    });
+    let report = elo_cmd::run_elo_test(
+        config,
+        book,
+        stop,
+        move |progress| {
+            if let Ok(mut p) = plain.lock() {
+                p.print_elo_progress(progress);
+            }
+        },
+        None,
+    );
     tui::print_elo_summary(&report);
 
     if let Ok(db_result) = ResultsDb::open_default() {

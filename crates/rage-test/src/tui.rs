@@ -17,9 +17,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 
+use rage_core::{Board, Color as PieceColor, PieceType};
+
 use crate::elo_cmd::EloProgress;
 use crate::sprt::SprtProgress;
-use crate::types::SprtDecision;
+use crate::types::{LiveGameState, SprtDecision};
 
 /// TUI state for SPRT test.
 pub struct SprtTui {
@@ -27,10 +29,15 @@ pub struct SprtTui {
     progress: Arc<Mutex<Option<SprtProgress>>>,
     stop: Arc<AtomicBool>,
     config_lines: Vec<String>,
+    live_state: Option<Arc<Mutex<LiveGameState>>>,
 }
 
 impl SprtTui {
-    pub fn new(stop: Arc<AtomicBool>, config_lines: Vec<String>) -> io::Result<Self> {
+    pub fn new(
+        stop: Arc<AtomicBool>,
+        config_lines: Vec<String>,
+        live_state: Option<Arc<Mutex<LiveGameState>>>,
+    ) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         stdout.execute(EnterAlternateScreen)?;
@@ -42,6 +49,7 @@ impl SprtTui {
             progress: Arc::new(Mutex::new(None)),
             stop,
             config_lines,
+            live_state,
         })
     }
 
@@ -81,6 +89,10 @@ impl SprtTui {
     fn draw(&mut self) -> io::Result<()> {
         let progress = self.progress.lock().ok().and_then(|g| g.clone());
         let config_lines = &self.config_lines;
+        let live_game = self
+            .live_state
+            .as_ref()
+            .and_then(|ls| ls.lock().ok().map(|g| g.clone()));
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -102,8 +114,26 @@ impl SprtTui {
                 .block(Block::default().borders(Borders::ALL).title(" rage-test "));
             frame.render_widget(config_block, chunks[0]);
 
-            // Stats block
-            if let Some(ref p) = progress {
+            // Board (left) + stats (right)
+            let show_board = live_game.is_some() && area.width >= 62;
+            if show_board {
+                let h_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(30), Constraint::Min(30)])
+                    .split(chunks[1]);
+
+                if let Some(ref gs) = live_game {
+                    render_board(frame, h_chunks[0], gs);
+                }
+
+                if let Some(ref p) = progress {
+                    render_sprt_stats(frame, h_chunks[1], p);
+                } else {
+                    let waiting = Paragraph::new("Waiting for results...")
+                        .block(Block::default().borders(Borders::ALL).title(" Results "));
+                    frame.render_widget(waiting, h_chunks[1]);
+                }
+            } else if let Some(ref p) = progress {
                 render_sprt_stats(frame, chunks[1], p);
             } else {
                 let waiting = Paragraph::new("Waiting for results...")
@@ -253,10 +283,15 @@ pub struct EloTui {
     progress: Arc<Mutex<Option<EloProgress>>>,
     stop: Arc<AtomicBool>,
     config_lines: Vec<String>,
+    live_state: Option<Arc<Mutex<LiveGameState>>>,
 }
 
 impl EloTui {
-    pub fn new(stop: Arc<AtomicBool>, config_lines: Vec<String>) -> io::Result<Self> {
+    pub fn new(
+        stop: Arc<AtomicBool>,
+        config_lines: Vec<String>,
+        live_state: Option<Arc<Mutex<LiveGameState>>>,
+    ) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         stdout.execute(EnterAlternateScreen)?;
@@ -268,6 +303,7 @@ impl EloTui {
             progress: Arc::new(Mutex::new(None)),
             stop,
             config_lines,
+            live_state,
         })
     }
 
@@ -303,6 +339,10 @@ impl EloTui {
     fn draw(&mut self) -> io::Result<()> {
         let progress = self.progress.lock().ok().and_then(|g| g.clone());
         let config_lines = &self.config_lines;
+        let live_game = self
+            .live_state
+            .as_ref()
+            .and_then(|ls| ls.lock().ok().map(|g| g.clone()));
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -323,7 +363,25 @@ impl EloTui {
                 .block(Block::default().borders(Borders::ALL).title(" rage-test "));
             frame.render_widget(config_block, chunks[0]);
 
-            if let Some(ref p) = progress {
+            let show_board = live_game.is_some() && area.width >= 62;
+            if show_board {
+                let h_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(30), Constraint::Min(30)])
+                    .split(chunks[1]);
+
+                if let Some(ref gs) = live_game {
+                    render_board(frame, h_chunks[0], gs);
+                }
+
+                if let Some(ref p) = progress {
+                    render_elo_stats(frame, h_chunks[1], p);
+                } else {
+                    let waiting = Paragraph::new("Waiting for results...")
+                        .block(Block::default().borders(Borders::ALL).title(" Results "));
+                    frame.render_widget(waiting, h_chunks[1]);
+                }
+            } else if let Some(ref p) = progress {
                 render_elo_stats(frame, chunks[1], p);
             } else {
                 let waiting = Paragraph::new("Waiting for results...")
@@ -464,6 +522,129 @@ impl PlainProgress {
             self.last_print_pairs = pairs;
         }
     }
+}
+
+/// Render a live chess board from the current game state.
+fn render_board(frame: &mut ratatui::Frame, area: Rect, state: &LiveGameState) {
+    let Ok(board) = Board::from_fen(&state.fen) else {
+        let err = Paragraph::new("Invalid FEN")
+            .block(Block::default().borders(Borders::ALL).title(" Board "));
+        frame.render_widget(err, area);
+        return;
+    };
+
+    // Board colors
+    let light_sq = Color::Rgb(238, 216, 180);
+    let dark_sq = Color::Rgb(180, 136, 100);
+    let white_piece = Color::Rgb(255, 255, 240);
+    let black_piece = Color::Rgb(40, 30, 20);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(12);
+
+    // File labels
+    lines.push(Line::from(Span::styled(
+        "   a  b  c  d  e  f  g  h",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // Board rows (rank 8 down to rank 1)
+    for rank in (0..8u8).rev() {
+        let mut spans: Vec<Span> = Vec::with_capacity(18);
+        spans.push(Span::styled(
+            format!(" {} ", rank + 1),
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        for file in 0..8u8 {
+            let sq = rage_core::Square::from_file_rank(
+                rage_core::File::new(file),
+                rage_core::Rank::new(rank),
+            );
+            let is_light = (file + rank) % 2 != 0;
+            let bg = if is_light { light_sq } else { dark_sq };
+
+            match board.piece_on(sq) {
+                Some(p) => {
+                    let fg = match p.color {
+                        PieceColor::White => white_piece,
+                        PieceColor::Black => black_piece,
+                    };
+                    let ch = piece_char(p.piece_type, p.color);
+                    spans.push(Span::styled(
+                        format!(" {ch} "),
+                        Style::default().fg(fg).bg(bg),
+                    ));
+                }
+                None => {
+                    spans.push(Span::styled("   ", Style::default().bg(bg)));
+                }
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // File labels (bottom)
+    lines.push(Line::from(Span::styled(
+        "   a  b  c  d  e  f  g  h",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // Info line: move number, last move, eval
+    let mut info_parts: Vec<String> = Vec::new();
+    if let Some(ref lm) = state.last_move {
+        info_parts.push(format!("{}. {}", state.move_number, lm));
+    }
+    if let Some(cp) = state.score_cp {
+        if state.is_mate_score {
+            info_parts.push(format!("M{}", cp.unsigned_abs()));
+        } else {
+            let score = cp as f64 / 100.0;
+            info_parts.push(format!("{score:+.2}"));
+        }
+    }
+    if !info_parts.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", info_parts.join("  ")),
+            Style::default().fg(Color::White),
+        )));
+    }
+
+    // Engine names
+    let names = format!(
+        " W: {}  B: {}",
+        truncate_str(&state.white_name, 10),
+        truncate_str(&state.black_name, 10),
+    );
+    lines.push(Line::from(Span::styled(
+        names,
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let board_widget =
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Board "));
+    frame.render_widget(board_widget, area);
+}
+
+/// Unicode chess piece character.
+fn piece_char(pt: PieceType, color: PieceColor) -> char {
+    match (color, pt) {
+        (PieceColor::White, PieceType::King) => '\u{2654}',
+        (PieceColor::White, PieceType::Queen) => '\u{2655}',
+        (PieceColor::White, PieceType::Rook) => '\u{2656}',
+        (PieceColor::White, PieceType::Bishop) => '\u{2657}',
+        (PieceColor::White, PieceType::Knight) => '\u{2658}',
+        (PieceColor::White, PieceType::Pawn) => '\u{2659}',
+        (PieceColor::Black, PieceType::King) => '\u{265A}',
+        (PieceColor::Black, PieceType::Queen) => '\u{265B}',
+        (PieceColor::Black, PieceType::Rook) => '\u{265C}',
+        (PieceColor::Black, PieceType::Bishop) => '\u{265D}',
+        (PieceColor::Black, PieceType::Knight) => '\u{265E}',
+        (PieceColor::Black, PieceType::Pawn) => '\u{265F}',
+    }
+}
+
+fn truncate_str(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len { s } else { &s[..max_len] }
 }
 
 /// Format a game outcome from engine A's perspective as a single letter.

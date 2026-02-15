@@ -3,12 +3,14 @@
 //! Plays a complete game between two UCI engines with clock management,
 //! game-over detection via rage-core Board, and adjudication.
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use rage_core::Board;
 
 use crate::types::{
-    GameOutcome, GameRecord, MatchConfig, SearchOverrides, TerminationReason, TimeControl,
+    GameOutcome, GameRecord, LiveGameState, MatchConfig, SearchOverrides, TerminationReason,
+    TimeControl,
 };
 use crate::uci::{GoParams, UciEngine};
 
@@ -28,6 +30,7 @@ pub fn play_game(
     fen: &str,
     config: &MatchConfig,
     engine_a_is_white: bool,
+    live_state: Option<&Mutex<LiveGameState>>,
 ) -> GameRecord {
     let start = Instant::now();
 
@@ -165,6 +168,18 @@ pub fn play_game(
 
         board.make_move(chess_move);
         moves.push(bestmove.clone());
+
+        // Update live game state for TUI
+        if let Some(ls) = live_state
+            && let Ok(mut state) = ls.lock()
+        {
+            state.fen = board.to_fen();
+            state.last_move = Some(bestmove.clone());
+            state.move_number = (ply as u16 / 2) + 1;
+            state.score_cp = go_result.score_cp;
+            state.is_mate_score = go_result.is_mate_score;
+            state.ply = ply + 1;
+        }
 
         // Check game termination conditions
         if board.is_checkmate() {
