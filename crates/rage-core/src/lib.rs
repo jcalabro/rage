@@ -4,6 +4,7 @@ pub mod board;
 mod error;
 pub mod movegen;
 pub mod moves;
+pub mod san;
 mod types;
 pub mod zobrist;
 

@@ -258,4 +258,45 @@ proptest! {
             }
         }
     }
+
+    /// Play a random game from startpos, verifying SAN roundtrip for every legal
+    /// move at each ply. This exercises SAN encoding/decoding across diverse
+    /// positions including promotions, castling, en passant, checks, and mates.
+    #[test]
+    fn san_roundtrip_random_game(seed in any::<u64>()) {
+        let mut rng = common::Xorshift(seed | 1);
+        let mut board = Board::starting_position();
+
+        for _ in 0..40 {
+            let moves = board.generate_legal_moves();
+
+            if moves.is_empty() {
+                break;
+            }
+
+            // Test SAN roundtrip for every legal move.
+            for &m in moves.as_slice() {
+                let san = board.move_to_san(m);
+                let parsed = board.parse_san(&san).unwrap_or_else(|e| {
+                    panic!(
+                        "failed to parse SAN '{san}' (from {m}) in position {}: {e}",
+                        board.to_fen()
+                    )
+                });
+                assert_eq!(
+                    parsed, m,
+                    "SAN roundtrip failed: '{san}' (move {m}) in position {}",
+                    board.to_fen()
+                );
+            }
+
+            // Pick a random move and play it.
+            let chosen_idx = (rng.next_u64() as usize) % moves.len();
+            board.make_move(moves.as_slice()[chosen_idx]);
+
+            if board.halfmove_clock() >= 100 {
+                break;
+            }
+        }
+    }
 }
