@@ -11,10 +11,7 @@ pub enum SyzygyError {
     /// No table found for the given material configuration.
     MissingTable(String),
     /// Position has too many pieces for available tables.
-    TooManyPieces {
-        found: u32,
-        max: u32,
-    },
+    TooManyPieces { found: u32, max: u32 },
     /// Position has castling rights (tablebases assume no castling).
     CastlingRights,
 }

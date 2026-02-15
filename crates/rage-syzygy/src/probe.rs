@@ -169,11 +169,7 @@ fn probe_wdl_direct(board: &mut Board, tablebase: &Tablebase, table_name: &str) 
 }
 
 /// Probe WDL when en passant is possible.
-fn probe_wdl_with_ep(
-    board: &mut Board,
-    tablebase: &Tablebase,
-    table_name: &str,
-) -> Option<Wdl> {
+fn probe_wdl_with_ep(board: &mut Board, tablebase: &Tablebase, table_name: &str) -> Option<Wdl> {
     // Probe without EP first (as if EP wasn't available)
     // Then check EP captures separately
     let mut best_wdl = Wdl::Loss;
@@ -490,8 +486,7 @@ mod tests {
     #[test]
     fn probe_wdl_too_many_pieces_returns_none() {
         // KQRBNPvKQRBNP = 12 pieces, way over limit
-        let mut board =
-            Board::from_fen("rnbqk3/pppp4/8/8/8/8/PPPP4/RNBQK3 w - - 0 1").unwrap();
+        let mut board = Board::from_fen("rnbqk3/pppp4/8/8/8/8/PPPP4/RNBQK3 w - - 0 1").unwrap();
         let tb = Tablebase::new("");
         assert_eq!(probe_wdl(&mut board, &tb), None);
     }

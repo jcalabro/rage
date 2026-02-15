@@ -159,11 +159,7 @@ pub fn transform_square(sq: Square, flip: u8) -> Square {
 /// For pawn tables: flip file if needed (fold to files a-d).
 pub fn pawn_file_flip(sq: Square) -> Square {
     let file = sq.file().index();
-    if file > 3 {
-        sq.flip_file()
-    } else {
-        sq
-    }
+    if file > 3 { sq.flip_file() } else { sq }
 }
 
 // ---------------------------------------------------------------------------
@@ -195,11 +191,7 @@ pub const NUM_TRIANGLE: u64 = 10;
 /// `others` are the remaining pieces (sorted by square index).
 ///
 /// Returns (index, table_size) or None if kings are adjacent (illegal).
-pub fn encode_pawnless(
-    king1: Square,
-    king2: Square,
-    others: &[Square],
-) -> Option<(u64, u64)> {
+pub fn encode_pawnless(king1: Square, king2: Square, others: &[Square]) -> Option<(u64, u64)> {
     let k1 = king1.index() as u8;
 
     // Map king1 to triangle index

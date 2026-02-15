@@ -31,7 +31,7 @@ impl Tablebase {
     /// Create a new tablebase collection from a colon/semicolon-separated path string.
     pub fn new(path: &str) -> Self {
         let paths: Vec<PathBuf> = path
-            .split([':',  ';'])
+            .split([':', ';'])
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .collect();
