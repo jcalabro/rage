@@ -141,6 +141,9 @@ pub struct Searcher {
     pub multi_pv: usize,
     /// Moves excluded at root during multi-PV iteration.
     root_excluded: Vec<Move>,
+    /// Tablebase-filtered root moves. When non-empty, only these moves are
+    /// searched at the root (prevents playing losing moves in TB positions).
+    root_tb_filter: Vec<Move>,
 }
 
 impl Searcher {
@@ -168,6 +171,7 @@ impl Searcher {
             thread_id: 0,
             multi_pv: 1,
             root_excluded: Vec::new(),
+            root_tb_filter: Vec::new(),
         }
     }
 
@@ -290,8 +294,28 @@ impl Searcher {
         let mut prev_best_move = Move::NULL;
         let mut stability_count = 0u32;
 
+        // Syzygy root move filtering: if the root position is in the tablebase,
+        // filter out losing moves so the engine only searches winning/drawing lines.
+        self.root_tb_filter.clear();
+        if let Some(ref tb) = self.syzygy
+            && board.castling_rights().bits() == 0
+            && board.occupied().popcount() <= tb.probe_limit
+        {
+            let legal = board.generate_legal_moves();
+            let filtered = rage_syzygy::filter_root_moves(board, tb, legal.as_slice());
+            if filtered.len() < legal.len() {
+                self.tbhits += 1;
+                self.root_tb_filter = filtered.into_iter().map(|(m, _)| m).collect();
+            }
+        }
+
         // Count root moves once to cap multi_pv
-        let num_root_moves = board.generate_legal_moves().len();
+        let root_moves = board.generate_legal_moves();
+        let num_root_moves = if self.root_tb_filter.is_empty() {
+            root_moves.len()
+        } else {
+            self.root_tb_filter.len()
+        };
         let multi_pv = self.multi_pv.min(num_root_moves).max(1);
 
         for depth in 1..=tm.max_depth().min(MAX_PLY as u32) {
@@ -759,6 +783,11 @@ impl Searcher {
 
             // Multi-PV: skip moves already selected by earlier PV lines
             if is_root && self.root_excluded.contains(&m) {
+                continue;
+            }
+
+            // Tablebase root filtering: skip moves not in the TB-filtered set
+            if is_root && !self.root_tb_filter.is_empty() && !self.root_tb_filter.contains(&m) {
                 continue;
             }
 
