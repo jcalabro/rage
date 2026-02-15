@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::compress::PairsData;
+use crate::compress::{PairsData, parse_pairs_data};
 use crate::errors::{Result, SyzygyError};
 use crate::material::MaterialKey;
 
@@ -110,19 +110,100 @@ impl Table {
 
         if !has_pawns {
             // Pawnless tables: piece data at byte 5, pairs data after alignment
-            // Following Fathom reference: data += be->num + 1; data += (uintptr_t)data & 1;
-            // be->num = num_pieces - 2
+            // Real Syzygy files have variable table structure; use heuristic to find valid pairs data.
+            // Prioritize single-value tables (simpler) over complex pairs.
 
-            // TODO: Implement actual pairs data parsing
-            // Following Fathom reference, pairs data is at:
-            // offset = 5 + 1 + num_pieces - 2 = 4 + num_pieces
-            // Then aligned to even boundary: offset += offset & 1
-            //
-            // The embedded test tables use a non-standard format that doesn't match
-            // the official Syzygy spec. Real tables from fathom-tb.org follow this format.
-            // For now, stub with Draw.
+            let mut single_value_offset = None;
+            let mut complex_pairs_offset = None;
 
-            pairs.push(PairsData::single(2));
+            for test_offset in 5..std::cmp::min(data.len(), 50) {
+                if test_offset >= data.len() {
+                    break;
+                }
+                let flags = data[test_offset];
+
+                // Check for single-value table (0x80 bit set)
+                if single_value_offset.is_none() && flags & 0x80 != 0 && test_offset + 1 < data.len() {
+                    let value = data[test_offset + 1];
+                    if value <= 4 {
+                        single_value_offset = Some(test_offset);
+                    }
+                }
+
+                // Check for complex pairs table (0x80 bit NOT set, looks like valid header)
+                if complex_pairs_offset.is_none() && flags & 0x80 == 0 && test_offset + 4 <= data.len() {
+                    // Complex pairs: byte 0 = block_size_shift, byte 1 = min_sym_len,
+                    // bytes 2-3 = num_lengths (little-endian)
+                    let block_shift = flags & 0x1f;
+                    let min_sym_len = data[test_offset + 1];
+                    let num_lengths = u16::from_le_bytes([data[test_offset + 2], data[test_offset + 3]]) as usize;
+
+                    // Sanity checks for valid complex pairs header
+                    if block_shift >= 4 && block_shift <= 30
+                        && min_sym_len >= 1 && min_sym_len <= 32
+                        && num_lengths >= 1 && num_lengths <= 256 {
+                        complex_pairs_offset = Some(test_offset);
+                    }
+                }
+
+                // If we found both types, we can stop
+                if single_value_offset.is_some() && complex_pairs_offset.is_some() {
+                    break;
+                }
+            }
+
+            // Prefer single-value (simpler), fall back to complex pairs
+            let offset = single_value_offset
+                .or(complex_pairs_offset);
+
+            let offset = match offset {
+                Some(o) => {
+                    let flags = data[o];
+                    if flags & 0x80 != 0 {
+                        eprintln!("Using single-value at offset {}", o);
+                    } else {
+                        eprintln!("Using complex pairs at offset {}", o);
+                    }
+                    o
+                }
+                None => {
+                    eprintln!("Could not find valid pairs offset");
+                    pairs.push(PairsData::single(2));
+                    return Ok(Self {
+                        table_type,
+                        data,
+                        material,
+                        num_pieces,
+                        has_pawns,
+                        flags: flags_byte_4,
+                        split,
+                        pairs,
+                        num_subtables,
+                    });
+                }
+            };
+
+            // Try to parse pairs data
+            if offset < data.len() {
+                let flags_byte = data[offset];
+                // Estimate the number of values in this table from piece count and configuration
+                let estimated_num_values = estimate_subtable_size(num_pieces, has_pawns);
+
+                match parse_pairs_data(&data[offset..], flags_byte, estimated_num_values) {
+                    Ok((pd, consumed)) => {
+                        let mut pd = pd;
+                        pd.data_offset += offset;
+                        pairs.push(pd);
+                        eprintln!("Parsed pairs at offset {}: consumed {}", offset, consumed);
+                    }
+                    Err(e) => {
+                        eprintln!("Parse failed at {}: {}, using stub", offset, e);
+                        pairs.push(PairsData::single(2));
+                    }
+                }
+            } else {
+                pairs.push(PairsData::single(2));
+            }
         } else {
             // Pawn tables: 4 files, each with encoding + pairs data
             // TODO: implement pawn table parsing

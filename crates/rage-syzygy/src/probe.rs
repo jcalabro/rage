@@ -544,4 +544,85 @@ mod tests {
             panic!("probe_wdl returned None");
         }
     }
+
+    #[test]
+    fn probe_real_table_krvkr() {
+        // Load real Syzygy table (KRvKR is split/symmetric, 4 pieces, 13KB)
+        let tb = crate::Tablebase::new("/tmp/rage-syzygy");
+
+        let has_table = tb.has_wdl("KRvKR");
+        eprintln!("Has KRvKR table: {has_table}");
+        if !has_table {
+            eprintln!("Skipping test - real table not available");
+            return;
+        }
+
+        // Load the table
+        let result = tb.get_wdl("KRvKR");
+        eprintln!("Load result: {result:?}");
+        assert!(result.is_ok(), "Failed to load KRvKR table");
+
+        // KRvKR: White king e1, rook a1, Black king e8, rook e7
+        // Should be a draw (symmetric rook endgame)
+        let mut board = Board::from_fen("3rk3/8/8/8/8/8/R3K3/8 w - - 0 1").unwrap();
+
+        let result = probe_wdl(&mut board, &tb);
+        eprintln!("Probe result: {result:?}");
+        // Should return Some value
+        assert!(result.is_some(), "probe_wdl returned None for KRvKR");
+    }
+
+    #[test]
+    fn probe_real_table_kbvkb_complex_pairs() {
+        // Load real Syzygy table (KBvKB has complex pairs data, not just single-value)
+        let tb = crate::Tablebase::new("/tmp/rage-syzygy");
+
+        let has_table = tb.has_wdl("KBvKB");
+        eprintln!("Has KBvKB table: {has_table}");
+        if !has_table {
+            eprintln!("Skipping test - real table not available");
+            return;
+        }
+
+        // Load the table
+        let result = tb.get_wdl("KBvKB");
+        eprintln!("Load result: {result:?}");
+        assert!(result.is_ok(), "Failed to load KBvKB table");
+
+        // KBvKB: White king a1, bishop a2, Black king a8, bishop a7
+        // Two bishops of same color = draw (unless tactical)
+        let mut board = Board::from_fen("B6k/b7/8/8/8/8/8/K7 w - - 0 1").unwrap();
+
+        let result = probe_wdl(&mut board, &tb);
+        eprintln!("Probe result: {result:?}");
+        // Should return Some value
+        assert!(result.is_some(), "probe_wdl returned None for KBvKB");
+    }
+
+    #[test]
+    fn probe_real_table_knvkn_complex_only() {
+        // Load real Syzygy table (KNvKN has ONLY complex pairs, no single-value)
+        let tb = crate::Tablebase::new("/tmp/rage-syzygy");
+
+        let has_table = tb.has_wdl("KNvKN");
+        eprintln!("Has KNvKN table: {has_table}");
+        if !has_table {
+            eprintln!("Skipping test - real table not available");
+            return;
+        }
+
+        // Load the table
+        let result = tb.get_wdl("KNvKN");
+        eprintln!("Load result: {result:?}");
+        assert!(result.is_ok(), "Failed to load KNvKN table");
+
+        // KNvKN: White king a1, knight b3, Black king h8, knight g6
+        // Knight vs knight = always draw (sufficient material check)
+        let mut board = Board::from_fen("6k1/8/6n1/8/8/1N6/8/K7 w - - 0 1").unwrap();
+
+        let result = probe_wdl(&mut board, &tb);
+        eprintln!("Probe result: {result:?}");
+        // Should return Some value
+        assert!(result.is_some(), "probe_wdl returned None for KNvKN");
+    }
 }

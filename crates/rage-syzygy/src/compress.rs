@@ -254,12 +254,14 @@ fn expand_symbol_at(sym: u32, offset: usize, pairs: &PairsData) -> Result<u8> {
 ///
 /// Returns the PairsData and the number of bytes consumed from `data`.
 pub fn parse_pairs_data(data: &[u8], flags: u8, num_values: u64) -> Result<(PairsData, usize)> {
-    // Flag bit 7: single-value table (WDL draw table with all zeros)
+    // Flag bit 7: single-value table
+    // Structure: byte 0 = flags (with 0x80 bit set), byte 1 = value
     if flags & 0x80 != 0 {
-        if data.is_empty() {
-            return Err(SyzygyError::Corrupted("empty single-value table".into()));
+        if data.len() < 2 {
+            return Err(SyzygyError::Corrupted("single-value table too short".into()));
         }
-        return Ok((PairsData::single(data[0]), 1));
+        // Value is at byte 1
+        return Ok((PairsData::single(data[1]), 2));
     }
 
     if data.len() < 10 {
@@ -306,6 +308,9 @@ pub fn parse_pairs_data(data: &[u8], flags: u8, num_values: u64) -> Result<(Pair
     let mut num_syms = 0u32;
 
     for i in 0..num_lengths {
+        if pos + i >= data.len() {
+            return Err(SyzygyError::Corrupted("code length distribution truncated".into()));
+        }
         let count = data[pos + i] as u32;
         offset.push(num_syms as u16);
         num_syms += count;
@@ -313,6 +318,9 @@ pub fn parse_pairs_data(data: &[u8], flags: u8, num_values: u64) -> Result<(Pair
         if i == 0 {
             base.push((count as u64).wrapping_sub(1));
         } else {
+            if base.is_empty() {
+                return Err(SyzygyError::Corrupted("huffman base table underflow".into()));
+            }
             base.push(((base[i - 1] + 1) * 2 + count as u64).wrapping_sub(1));
         }
     }
