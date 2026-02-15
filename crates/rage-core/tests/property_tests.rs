@@ -163,6 +163,10 @@ proptest! {
 // ---------------------------------------------------------------------------
 
 proptest! {
+    // Fewer cases by default (game-playing tests are expensive).
+    // `just test-long` overrides via PROPTEST_CASES=2048.
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
     /// Play a random game from startpos, verifying Zobrist and make/unmake at each ply.
     #[test]
     fn make_unmake_random_game(seed in any::<u64>()) {
