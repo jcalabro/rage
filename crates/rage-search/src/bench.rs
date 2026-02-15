@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use web_time::Instant;
 
 use rage_core::Board;
 use rage_nnue::NnueNetwork;

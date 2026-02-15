@@ -326,6 +326,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn from_file_roundtrip() {
         let original = NnueWeights::random(42);
         let bytes = original.to_bytes();
@@ -348,12 +349,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn from_file_nonexistent_path() {
         let result = NnueWeights::from_file(std::path::Path::new("/tmp/does_not_exist_12345.nnue"));
         assert!(result.is_err(), "nonexistent file should return error");
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn from_file_corrupt_data() {
         let dir = std::env::temp_dir().join("rage_test_weights");
         std::fs::create_dir_all(&dir).unwrap();

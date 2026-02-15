@@ -10,3 +10,4 @@ workspace = true
 rage-core = { path = "../rage-core" }
 rage-nnue = { path = "../rage-nnue" }
 rage-syzygy = { path = "../rage-syzygy" }
+web-time = "1"

@@ -335,6 +335,7 @@ mod tests {
     /// Verifies no panics/crashes and that probed entries are internally consistent
     /// (the verification key mechanism rejects torn reads).
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn concurrent_store_and_probe() {
         use std::sync::Arc;
         use std::thread;

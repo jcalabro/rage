@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use web_time::Instant;
 
 use rage_core::Color;
 
@@ -284,6 +284,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn ponder_offset_adjusts_elapsed() {
         let ponder_offset = Arc::new(AtomicU64::new(0));
         let limits = SearchLimits {

@@ -9,6 +9,7 @@ members = [
     "crates/rage-engine",
     "crates/rage-train",
     "crates/rage-test",
+    "crates/rage-wasm",
 ]
 
 [workspace.package]

@@ -1,0 +1,16 @@
+[package]
+name = "rage-wasm"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rage-core = { path = "../rage-core" }
+rage-nnue = { path = "../rage-nnue" }
+rage-search = { path = "../rage-search" }
+wasm-bindgen = "0.2"
+
+[lints]
+workspace = true

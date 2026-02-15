@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
 use rage_core::Board;
@@ -142,77 +143,84 @@ impl ThreadPool {
 
         self.tt.new_search();
 
-        // Single-thread fast path
+        // Single-thread fast path (always used on wasm)
         if self.num_threads == 1 {
             let result = self.searchers[0].search(board, limits, stop, info_callback);
             self.thread_nodes[0].store(self.searchers[0].nodes, Ordering::Relaxed);
             return result;
         }
 
-        // Multi-thread: spawn helpers (threads 1..N), run thread 0 inline.
-        let mut handles = Vec::with_capacity(self.num_threads - 1);
+        #[cfg(target_arch = "wasm32")]
+        unreachable!();
 
-        // Take helper searchers out of the pool temporarily
-        let mut helpers: Vec<Searcher> = self.searchers.drain(1..).collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Multi-thread: spawn helpers (threads 1..N), run thread 0 inline.
+            let mut handles = Vec::with_capacity(self.num_threads - 1);
 
-        for (i, mut helper) in helpers.drain(..).enumerate() {
-            let mut helper_board = board.clone();
-            let helper_limits = limits.clone();
-            let helper_stop = Arc::clone(&stop);
-            let thread_nodes = Arc::clone(&self.thread_nodes);
-            let thread_idx = i + 1;
+            // Take helper searchers out of the pool temporarily
+            let mut helpers: Vec<Searcher> = self.searchers.drain(1..).collect();
 
-            let handle = thread::spawn(move || {
-                let _result = helper.search(&mut helper_board, &helper_limits, helper_stop, None);
-                thread_nodes[thread_idx].store(helper.nodes, Ordering::Relaxed);
-                helper
-            });
-            handles.push(handle);
-        }
+            for (i, mut helper) in helpers.drain(..).enumerate() {
+                let mut helper_board = board.clone();
+                let helper_limits = limits.clone();
+                let helper_stop = Arc::clone(&stop);
+                let thread_nodes = Arc::clone(&self.thread_nodes);
+                let thread_idx = i + 1;
 
-        // Wrap the info callback to aggregate node counts from all threads
-        let thread_nodes_for_cb = Arc::clone(&self.thread_nodes);
-        let wrapped_cb: Option<InfoCallback> = info_callback.map(|cb| {
-            let nodes_ref = thread_nodes_for_cb;
-            let wrapper: InfoCallback = Box::new(move |info| {
-                // Sum nodes from all threads for accurate NPS
-                let total: u64 = nodes_ref.iter().map(|n| n.load(Ordering::Relaxed)).sum();
-                let adjusted = crate::search::SearchInfo {
-                    depth: info.depth,
-                    seldepth: info.seldepth,
-                    score: info.score,
-                    nodes: total + info.nodes, // thread 0's nodes not yet stored
-                    time_ms: info.time_ms,
-                    pv: info.pv.clone(),
-                    hashfull: info.hashfull,
-                    tbhits: info.tbhits,
-                };
-                cb(&adjusted);
-            });
-            wrapper
-        });
-
-        // Run thread 0 inline
-        let result = self.searchers[0].search(board, limits, Arc::clone(&stop), wrapped_cb);
-        self.thread_nodes[0].store(self.searchers[0].nodes, Ordering::Relaxed);
-
-        // Signal all helpers to stop
-        stop.store(true, Ordering::Relaxed);
-
-        // Join helpers and put them back
-        for handle in handles {
-            if let Ok(helper) = handle.join() {
-                self.searchers.push(helper);
+                let handle = thread::spawn(move || {
+                    let _result =
+                        helper.search(&mut helper_board, &helper_limits, helper_stop, None);
+                    thread_nodes[thread_idx].store(helper.nodes, Ordering::Relaxed);
+                    helper
+                });
+                handles.push(handle);
             }
-        }
 
-        // Re-sort by thread_id so the pool is in order
-        self.searchers.sort_by_key(|s| s.thread_id);
+            // Wrap the info callback to aggregate node counts from all threads
+            let thread_nodes_for_cb = Arc::clone(&self.thread_nodes);
+            let wrapped_cb: Option<InfoCallback> = info_callback.map(|cb| {
+                let nodes_ref = thread_nodes_for_cb;
+                let wrapper: InfoCallback = Box::new(move |info| {
+                    // Sum nodes from all threads for accurate NPS
+                    let total: u64 = nodes_ref.iter().map(|n| n.load(Ordering::Relaxed)).sum();
+                    let adjusted = crate::search::SearchInfo {
+                        depth: info.depth,
+                        seldepth: info.seldepth,
+                        score: info.score,
+                        nodes: total + info.nodes, // thread 0's nodes not yet stored
+                        time_ms: info.time_ms,
+                        pv: info.pv.clone(),
+                        hashfull: info.hashfull,
+                        tbhits: info.tbhits,
+                    };
+                    cb(&adjusted);
+                });
+                wrapper
+            });
 
-        // Return thread 0's result with total node count
-        SearchResult {
-            nodes: self.total_nodes(),
-            ..result
+            // Run thread 0 inline
+            let result = self.searchers[0].search(board, limits, Arc::clone(&stop), wrapped_cb);
+            self.thread_nodes[0].store(self.searchers[0].nodes, Ordering::Relaxed);
+
+            // Signal all helpers to stop
+            stop.store(true, Ordering::Relaxed);
+
+            // Join helpers and put them back
+            for handle in handles {
+                if let Ok(helper) = handle.join() {
+                    self.searchers.push(helper);
+                }
+            }
+
+            // Re-sort by thread_id so the pool is in order
+            self.searchers.sort_by_key(|s| s.thread_id);
+
+            // Return thread 0's result with total node count
+            SearchResult {
+                nodes: self.total_nodes(),
+                ..result
+            }
         }
     }
 }
@@ -247,6 +255,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn lazy_smp_two_threads_shared_tt() {
         let mut pool = ThreadPool::new(2, 16);
         let mut board =
@@ -274,6 +283,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn lazy_smp_four_threads() {
         let mut pool = ThreadPool::new(4, 16);
         let mut board =
@@ -295,6 +305,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn lazy_smp_finds_mate_in_one() {
         // Scholars mate position: Qh5f7# is the only winning move
         let mut pool = ThreadPool::new(4, 16);
@@ -321,6 +332,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn repeated_multithreaded_searches() {
         // Multiple search/stop cycles shouldn't corrupt state
         let mut pool = ThreadPool::new(2, 16);
@@ -344,6 +356,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn total_nodes_aggregates_all_threads() {
         let mut pool = ThreadPool::new(2, 16);
         let mut board =
@@ -368,6 +381,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn set_num_threads_adjusts_pool() {
         let mut pool = ThreadPool::new(1, 16);
         assert_eq!(pool.num_threads, 1);
@@ -394,6 +408,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn set_network_propagates_to_all_threads() {
         let mut pool = ThreadPool::new(4, 16);
         let network = make_test_network();
@@ -406,6 +421,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn set_network_none_clears_all_threads() {
         let mut pool = ThreadPool::new(2, 16);
         pool.set_network(Some(make_test_network()));
@@ -446,6 +462,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn network_survives_set_num_threads() {
         let mut pool = ThreadPool::new(1, 16);
         pool.set_network(Some(make_test_network()));
@@ -469,6 +486,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn network_survives_clear() {
         let mut pool = ThreadPool::new(2, 16);
         pool.set_network(Some(make_test_network()));
@@ -498,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn search_with_nnue_network() {
         let mut pool = ThreadPool::new(2, 16);
         pool.set_network(Some(make_test_network()));
@@ -518,6 +537,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", ignore)]
     fn clear_resets_state() {
         let mut pool = ThreadPool::new(2, 16);
         let mut board =

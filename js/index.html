@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Rage Chess Engine — Wasm Demo</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 2rem; }
+    h1 { color: #e94560; }
+    pre { background: #16213e; padding: 1rem; border-radius: 4px; overflow-x: auto; }
+    .ok { color: #0f3460; background: #4ecca3; padding: 2px 6px; border-radius: 2px; }
+    #output { white-space: pre-wrap; }
+    button { background: #e94560; color: white; border: none; padding: 0.5rem 1rem;
+             cursor: pointer; border-radius: 4px; font-family: monospace; font-size: 1rem; }
+    button:hover { background: #c73e54; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <h1>Rage Chess Engine</h1>
+  <p>Open the browser console for detailed output.</p>
+  <button id="run" onclick="runDemo()">Run Demo</button>
+  <pre id="output"></pre>
+
+  <script type="module">
+    import { Rage } from './rage.js';
+
+    function log(msg) {
+      const el = document.getElementById('output');
+      el.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    async function runDemo() {
+      const btn = document.getElementById('run');
+      btn.disabled = true;
+      document.getElementById('output').textContent = '';
+
+      try {
+        log('Loading wasm module...');
+        const rage = await Rage.initialize('../pkg/rage_wasm.js');
+        log('Wasm loaded!\n');
+
+        // --- Chess Library Demo ---
+        log('=== Chess Library (RageBoard) ===\n');
+        const board = rage.createBoard();
+        log('Starting position:');
+        log(board.toString());
+        log('FEN: ' + board.fen);
+        log('Legal moves: ' + board.legalMoves().length);
+        log('Side to move: ' + board.sideToMove);
+
+        board.makeMove('e2e4').makeMove('e7e5').makeMove('g1f3').makeMove('b8c6');
+        log('\nAfter 1. e4 e5 2. Nf3 Nc6:');
+        log(board.toString());
+        log('In check: ' + board.inCheck);
+        log('Piece on e4: ' + board.pieceOn('e4'));
+        log('Piece on e5: ' + board.pieceOn('e5'));
+        log('Zobrist: ' + board.zobristHash);
+
+        board.undoMove();
+        log('\nAfter undo (back to 2. Nf3):');
+        log('FEN: ' + board.fen);
+        board.free();
+
+        // --- Scholars Mate ---
+        log('\n=== Scholars Mate ===\n');
+        const mate = rage.createBoard();
+        const moves = ['e2e4', 'e7e5', 'f1c4', 'b8c6', 'd1h5', 'g8f6', 'h5f7'];
+        for (const m of moves) {
+          mate.makeMove(m);
+        }
+        log(mate.toString());
+        log('Checkmate: ' + mate.isCheckmate);
+        log('Game over: ' + mate.isGameOver);
+        mate.free();
+
+        // --- Engine Demo ---
+        log('\n=== Engine (RageEngine) ===\n');
+        const engine = rage.createEngine({ hashMb: 16 });
+        log('Engine created (16 MB hash, PST eval)');
+
+        log('Searching starting position to depth 8...');
+        const t0 = performance.now();
+        const result = engine.search({ depth: 8 });
+        const elapsed = (performance.now() - t0).toFixed(0);
+        log('Best move: ' + result.bestMove);
+        log('Score: ' + result.score + ' cp');
+        log('Depth: ' + result.depth);
+        log('Nodes: ' + result.nodes.toLocaleString());
+        log('PV: ' + result.pv);
+        log('Time: ' + elapsed + ' ms');
+        log('Is mate: ' + result.isMate);
+
+        engine.makeMove(result.bestMove);
+        log('\nPosition after best move:');
+        log('FEN: ' + engine.fen);
+        log('Legal moves: ' + engine.legalMoves().length);
+
+        engine.free();
+        log('\nDemo complete!');
+      } catch (e) {
+        log('ERROR: ' + e.message);
+        console.error(e);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // Expose to onclick
+    window.runDemo = runDemo;
+  </script>
+</body>
+</html>

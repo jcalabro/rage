@@ -6,6 +6,8 @@ install-tools:
     rustup install 1.93.1
     rustup override set 1.93.1
     rustup component add clippy rust-analyzer
+    rustup target add wasm32-unknown-unknown wasm32-wasip1
+    cargo install wasm-pack
 
 # Runs the linter
 lint:
@@ -69,3 +71,23 @@ bench-diff engine-a engine-b *ARGS:
 # Show test result history
 history *ARGS:
     cargo run --release --bin rage-test -- history {{ARGS}}
+
+# --- WebAssembly ---
+
+# Build wasm module (requires wasm-pack: cargo install wasm-pack)
+wasm *ARGS:
+    wasm-pack build crates/rage-wasm --target web --out-dir ../../pkg {{ARGS}}
+
+# Build wasm module (release, optimized)
+wasm-release:
+    wasm-pack build crates/rage-wasm --target web --out-dir ../../pkg --release
+
+# Run crate tests on wasm via wasmtime (wasm32-wasip1)
+# rage-core is check-only because proptest (dev-dep) doesn't compile on wasm
+wasm-test:
+    cargo check --target wasm32-wasip1 -p rage-core
+    cargo test --target wasm32-wasip1 -p rage-nnue -p rage-search
+
+# Verify rage-wasm builds for browser target
+wasm-check:
+    cargo check --target wasm32-unknown-unknown -p rage-wasm

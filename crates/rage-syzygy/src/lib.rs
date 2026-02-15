@@ -77,14 +77,26 @@ mod wasm_stub {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Dtz(pub i32);
 
-    pub struct Tablebase;
+    pub struct Tablebase {
+        pub probe_depth: u32,
+        pub probe_limit: u32,
+    }
 
     impl Tablebase {
         pub fn new(_path: &str) -> Self {
-            Self
+            Self {
+                probe_depth: 1,
+                probe_limit: 0,
+            }
         }
         pub fn is_available(&self) -> bool {
             false
+        }
+        pub fn set_probe_depth(&mut self, depth: u32) {
+            self.probe_depth = depth;
+        }
+        pub fn set_probe_limit(&mut self, limit: u32) {
+            self.probe_limit = limit;
         }
     }
 
