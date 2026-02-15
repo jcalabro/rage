@@ -2,12 +2,15 @@
 //!
 //! Handles reading the file header, setting up subtable compression parameters,
 //! and providing access to the raw table data.
+//!
+//! Reference: shakmaty-syzygy by niklasf.
 
 use std::fs;
 use std::path::Path;
 
 use crate::compress::{PairsData, parse_pairs_data};
 use crate::errors::{Result, SyzygyError};
+use crate::indexing::{GroupData, TablePiece, piece_from_nibble};
 use crate::material::MaterialKey;
 
 // ---------------------------------------------------------------------------
@@ -31,6 +34,18 @@ pub enum TableType {
     Dtz,
 }
 
+/// Encoding and compression for one side of a subtable.
+#[derive(Clone, Debug)]
+pub struct SideData {
+    pub pairs: PairsData,
+}
+
+/// Encoding and compression for both sides of a file subtable.
+#[derive(Clone, Debug)]
+pub struct FileData {
+    pub sides: Vec<SideData>,
+}
+
 /// A parsed Syzygy table file.
 pub struct Table {
     /// The type of table (WDL or DTZ).
@@ -47,13 +62,12 @@ pub struct Table {
     pub flags: u8,
     /// Whether the table is split (has separate subtables for each side).
     pub split: bool,
-    /// Compression parameters for each subtable.
-    /// WDL: up to 4 subtables (Win, CursedWin/BlessedLoss, Draw, Loss) x 2 sides
-    /// DTZ: 1-4 subtables depending on encoding
-    pub pairs: Vec<PairsData>,
-    /// Mapping from (side_to_move, wdl_value) to subtable index.
-    /// For WDL: pairs[map[side][wdl+2]] gives the right subtable.
-    pub num_subtables: usize,
+    /// File subtables (1 for pawnless, 4 for pawn tables).
+    pub files: Vec<FileData>,
+    /// Number of unique piece roles (from material key).
+    pub num_unique_pieces: usize,
+    /// Minimum count among groups of 2+ identical pieces.
+    pub min_like_man: usize,
 }
 
 impl Table {
@@ -63,7 +77,16 @@ impl Table {
         Self::parse(data, table_type, path)
     }
 
-    /// Parse table data (for testing without file I/O).
+    /// Parse table data following the Syzygy format specification.
+    ///
+    /// Layout:
+    /// 1. Magic (4 bytes) + flags (1 byte)
+    /// 2. Group data: order bytes + piece lists for each file/side
+    /// 3. Align to even boundary
+    /// 4. Pairs headers (sequentially for all subtables)
+    /// 5. Sparse indices (grouped for all subtables)
+    /// 6. Block lengths (grouped for all subtables)
+    /// 7. Compressed data (64-byte aligned, grouped for all subtables)
     pub fn parse(data: Vec<u8>, table_type: TableType, path: &Path) -> Result<Self> {
         if data.len() < 16 {
             return Err(SyzygyError::Corrupted(format!(
@@ -72,7 +95,7 @@ impl Table {
             )));
         }
 
-        // Verify magic number
+        // 1. Verify magic number.
         let expected_magic = match table_type {
             TableType::Wdl => &WDL_MAGIC,
             TableType::Dtz => &DTZ_MAGIC,
@@ -84,131 +107,110 @@ impl Table {
             )));
         }
 
-        // Extract material key from filename (needed to know piece count)
+        // Extract material key from filename.
         let material = material_key_from_path(path)?;
-
-        // Parse header (Syzygy WDL format)
-        // Byte 4: flags
-        // Bit 0 (0x01): split flag (WDL never split, but DTZ can be)
-        // Bit 1 (0x02): files flag (4 files if set, 1 if not) - only for pawn tables
-        let flags_byte_4 = data[4];
-        let split = flags_byte_4 & 0x01 != 0;
-        let has_pawns = flags_byte_4 & 0x02 != 0;
-
-        // For WDL, pawnless tables: always 1 subtable (no split)
-        // For WDL, pawn tables: 4 subtables (one per file)
-        let num_subtables = if has_pawns { 4 } else { 1 };
-
-        // Count of pieces from material key
         let num_pieces = material.total_pieces();
+        let num_unique_pieces = material.unique_pieces();
+        let min_like_man = material.min_like_man();
 
-        // Count of pieces excluding kings (for future use when parsing complex headers)
-        let _num_non_king_pieces = (num_pieces as usize).saturating_sub(2).max(0);
+        // Read flags.
+        let flags_byte = data[4];
+        let split = flags_byte & 0x01 != 0;
+        let has_pawns = flags_byte & 0x02 != 0;
 
-        // Parse subtable compression parameters
-        let mut pairs = Vec::with_capacity(num_subtables);
-
-        if !has_pawns {
-            // Pawnless tables: piece data at byte 5, pairs data after alignment
-            // Real Syzygy files have variable table structure; use heuristic to find valid pairs data.
-            // Prioritize single-value tables (simpler) over complex pairs.
-
-            let mut single_value_offset = None;
-            let mut complex_pairs_offset = None;
-
-            for test_offset in 5..std::cmp::min(data.len(), 50) {
-                if test_offset >= data.len() {
-                    break;
-                }
-                let flags = data[test_offset];
-
-                // Check for single-value table (0x80 bit set)
-                if single_value_offset.is_none() && flags & 0x80 != 0 && test_offset + 1 < data.len() {
-                    let value = data[test_offset + 1];
-                    if value <= 4 {
-                        single_value_offset = Some(test_offset);
-                    }
-                }
-
-                // Check for complex pairs table (0x80 bit NOT set, looks like valid header)
-                if complex_pairs_offset.is_none() && flags & 0x80 == 0 && test_offset + 4 <= data.len() {
-                    // Complex pairs: byte 0 = block_size_shift, byte 1 = min_sym_len,
-                    // bytes 2-3 = num_lengths (little-endian)
-                    let block_shift = flags & 0x1f;
-                    let min_sym_len = data[test_offset + 1];
-                    let num_lengths = u16::from_le_bytes([data[test_offset + 2], data[test_offset + 3]]) as usize;
-
-                    // Sanity checks for valid complex pairs header
-                    if block_shift >= 4 && block_shift <= 30
-                        && min_sym_len >= 1 && min_sym_len <= 32
-                        && num_lengths >= 1 && num_lengths <= 256 {
-                        complex_pairs_offset = Some(test_offset);
-                    }
-                }
-
-                // If we found both types, we can stop
-                if single_value_offset.is_some() && complex_pairs_offset.is_some() {
-                    break;
-                }
-            }
-
-            // Prefer single-value (simpler), fall back to complex pairs
-            let offset = single_value_offset
-                .or(complex_pairs_offset);
-
-            let offset = match offset {
-                Some(o) => {
-                    let flags = data[o];
-                    if flags & 0x80 != 0 {
-                        eprintln!("Using single-value at offset {}", o);
-                    } else {
-                        eprintln!("Using complex pairs at offset {}", o);
-                    }
-                    o
-                }
-                None => {
-                    eprintln!("Could not find valid pairs offset");
-                    pairs.push(PairsData::single(2));
-                    return Ok(Self {
-                        table_type,
-                        data,
-                        material,
-                        num_pieces,
-                        has_pawns,
-                        flags: flags_byte_4,
-                        split,
-                        pairs,
-                        num_subtables,
-                    });
-                }
-            };
-
-            // Try to parse pairs data
-            if offset < data.len() {
-                let flags_byte = data[offset];
-                // Estimate the number of values in this table from piece count and configuration
-                let estimated_num_values = estimate_subtable_size(num_pieces, has_pawns);
-
-                match parse_pairs_data(&data[offset..], flags_byte, estimated_num_values) {
-                    Ok((pd, consumed)) => {
-                        let mut pd = pd;
-                        pd.data_offset += offset;
-                        pairs.push(pd);
-                        eprintln!("Parsed pairs at offset {}: consumed {}", offset, consumed);
-                    }
-                    Err(e) => {
-                        eprintln!("Parse failed at {}: {}, using stub", offset, e);
-                        pairs.push(PairsData::single(2));
-                    }
-                }
-            } else {
-                pairs.push(PairsData::single(2));
-            }
+        let pp = material.white_pawn_count() > 0 && material.black_pawn_count() > 0;
+        let num_files = if has_pawns { 4usize } else { 1 };
+        // For WDL: 2 sides if not symmetric, 1 if symmetric.
+        // For DTZ: always 1 side.
+        let num_sides = if table_type == TableType::Wdl && split {
+            2usize
         } else {
-            // Pawn tables: 4 files, each with encoding + pairs data
-            // TODO: implement pawn table parsing
-            for _ in 0..num_subtables {
-                pairs.push(PairsData::single(0));
+            1
+        };
+
+        // 2. Parse group data: order bytes and piece lists.
+        let mut ptr = 5usize;
+
+        // For each file, read order bytes and piece list, build GroupData.
+        let mut file_groups: Vec<Vec<GroupData>> = Vec::with_capacity(num_files);
+
+        for file in 0..num_files {
+            if ptr + 1 + usize::from(pp) > data.len() {
+                return Err(SyzygyError::Corrupted("order bytes truncated".into()));
+            }
+
+            // Read order bytes.
+            let order_0 = [data[ptr] & 0xf, if pp { data[ptr + 1] & 0xf } else { 0xf }];
+            let order_1 = [data[ptr] >> 4, if pp { data[ptr + 1] >> 4 } else { 0xf }];
+
+            ptr += 1 + usize::from(pp);
+
+            // Read piece list for each side.
+            let mut side_groups = Vec::with_capacity(num_sides);
+            for side in 0..num_sides {
+                if ptr + num_pieces as usize > data.len() {
+                    return Err(SyzygyError::Corrupted("piece list truncated".into()));
+                }
+
+                // Parse pieces from the header bytes.
+                let pieces = parse_piece_list(&data, ptr, num_pieces as usize, side)?;
+
+                let order = if side == 0 { order_0 } else { order_1 };
+                let groups = GroupData::new(pieces, order, &material).ok_or_else(|| {
+                    SyzygyError::Corrupted(format!(
+                        "failed to compute GroupData for file {file} side {side}"
+                    ))
+                })?;
+                side_groups.push(groups);
+            }
+
+            // Only the first side's piece list advances the pointer.
+            // (Both sides share the same piece bytes, just interpreted differently.)
+            if file == 0 {
+                ptr += num_pieces as usize;
+            }
+
+            file_groups.push(side_groups);
+        }
+
+        // 3. Align to even boundary.
+        ptr += ptr & 1;
+
+        // 4. Parse pairs headers sequentially for all subtables.
+        let mut files: Vec<FileData> = Vec::with_capacity(num_files);
+        for file_group in file_groups.iter().take(num_files) {
+            let mut sides = Vec::with_capacity(num_sides);
+            for side_group in file_group.iter().take(num_sides) {
+                let groups = side_group.clone();
+                let (pairs, next_ptr) = parse_pairs_data(&data, ptr, groups)?;
+                sides.push(SideData { pairs });
+                ptr = next_ptr;
+            }
+            files.push(FileData { sides });
+        }
+
+        // 5. Assign sparse index offsets (grouped for all subtables).
+        for file in &mut files {
+            for side in &mut file.sides {
+                side.pairs.sparse_index = ptr;
+                ptr += side.pairs.sparse_index_size as usize * 6;
+            }
+        }
+
+        // 6. Assign block length offsets (grouped for all subtables).
+        for file in &mut files {
+            for side in &mut file.sides {
+                side.pairs.block_lengths = ptr;
+                ptr += side.pairs.block_length_size as usize * 2;
+            }
+        }
+
+        // 7. Assign compressed data offsets (64-byte aligned).
+        for file in &mut files {
+            for side in &mut file.sides {
+                ptr = (ptr + 0x3f) & !0x3f; // 64-byte alignment
+                side.pairs.data = ptr;
+                ptr += side.pairs.blocks_num as usize * side.pairs.block_size as usize;
             }
         }
 
@@ -218,41 +220,37 @@ impl Table {
             material,
             num_pieces,
             has_pawns,
-            flags: flags_byte_4,
+            flags: flags_byte,
             split,
-            pairs,
-            num_subtables,
+            files,
+            num_unique_pieces,
+            min_like_man,
         })
     }
 }
 
-/// Estimate the number of values in a subtable based on piece count.
-/// This is a rough estimate used during initial parsing; the exact value
-/// comes from the index calculation.
-fn estimate_subtable_size(num_pieces: u32, has_pawns: bool) -> u64 {
-    if has_pawns {
-        // Rough estimate for pawn tables
-        match num_pieces {
-            3 => 18_816,
-            4 => 1_140_480,
-            5 => 68_428_800,
-            _ => 1_000_000,
-        }
-    } else {
-        // Pawnless tables
-        match num_pieces {
-            3 => 10 * 63, // triangle(10) * 63 remaining squares
-            4 => 10 * 63 * 62,
-            5 => 10 * 63 * BINOM_62_2,
-            _ => 1_000_000,
-        }
+/// Parse a piece list from raw header bytes.
+///
+/// Each byte encodes two pieces: low nibble for side 0, high nibble for side 1.
+/// This matches how shakmaty-syzygy reads pieces with `side.fold_wb(low, high)`.
+fn parse_piece_list(
+    data: &[u8],
+    offset: usize,
+    count: usize,
+    side: usize,
+) -> Result<Vec<TablePiece>> {
+    let mut pieces = Vec::with_capacity(count);
+    for i in 0..count {
+        let byte = data[offset + i];
+        let nibble = if side == 0 { byte & 0xf } else { byte >> 4 };
+        let piece = piece_from_nibble(nibble)
+            .ok_or_else(|| SyzygyError::Corrupted(format!("invalid piece nibble: {nibble:#x}")))?;
+        pieces.push(piece);
     }
+    Ok(pieces)
 }
 
-const BINOM_62_2: u64 = 1891;
-
 /// Extract material key from a table filename.
-/// Example: "KRvK.rtbw" -> MaterialKey for KR vs K
 fn material_key_from_path(path: &Path) -> Result<MaterialKey> {
     let stem = path
         .file_stem()
@@ -280,12 +278,10 @@ pub fn parse_material_key(name: &str) -> Result<MaterialKey> {
 }
 
 /// Parse piece characters for one side (e.g. "KR" -> [0,0,0,1,0]).
-/// The leading 'K' is mandatory and skipped (kings are implicit).
 fn parse_side_pieces(s: &str) -> Result<[u8; 5]> {
     let mut counts = [0u8; 5];
     let mut chars = s.chars();
 
-    // First character must be 'K'
     match chars.next() {
         Some('K') => {}
         _ => {
@@ -321,36 +317,35 @@ mod tests {
     #[test]
     fn parse_material_key_krk() {
         let key = parse_material_key("KRvK").unwrap();
-        assert_eq!(key.counts[0], [0, 0, 0, 1, 0]); // white: rook
-        assert_eq!(key.counts[1], [0, 0, 0, 0, 0]); // black: nothing
+        assert_eq!(key.counts[0], [0, 0, 0, 1, 0]);
+        assert_eq!(key.counts[1], [0, 0, 0, 0, 0]);
         assert_eq!(key.table_name(), "KRvK");
     }
 
     #[test]
     fn parse_material_key_kqr_vs_kr() {
         let key = parse_material_key("KQRvKR").unwrap();
-        assert_eq!(key.counts[0], [0, 0, 0, 1, 1]); // white: rook + queen
-        assert_eq!(key.counts[1], [0, 0, 0, 1, 0]); // black: rook
+        assert_eq!(key.counts[0], [0, 0, 0, 1, 1]);
+        assert_eq!(key.counts[1], [0, 0, 0, 1, 0]);
     }
 
     #[test]
     fn parse_material_key_kp_vs_kp() {
         let key = parse_material_key("KPvKP").unwrap();
-        assert_eq!(key.counts[0], [1, 0, 0, 0, 0]); // white: pawn
-        assert_eq!(key.counts[1], [1, 0, 0, 0, 0]); // black: pawn
+        assert_eq!(key.counts[0], [1, 0, 0, 0, 0]);
+        assert_eq!(key.counts[1], [1, 0, 0, 0, 0]);
         assert!(key.has_pawns());
     }
 
     #[test]
     fn parse_material_key_invalid() {
-        assert!(parse_material_key("KRK").is_err()); // no 'v'
-        assert!(parse_material_key("RvK").is_err()); // no leading K
-        assert!(parse_material_key("KXvK").is_err()); // invalid piece
+        assert!(parse_material_key("KRK").is_err());
+        assert!(parse_material_key("RvK").is_err());
+        assert!(parse_material_key("KXvK").is_err());
     }
 
     #[test]
     fn wdl_magic_correct() {
-        // Verify magic bytes match Syzygy spec
         assert_eq!(WDL_MAGIC, [0x71, 0xE8, 0x23, 0x5D]);
         assert_eq!(DTZ_MAGIC, [0xD7, 0x66, 0x0C, 0xA5]);
     }

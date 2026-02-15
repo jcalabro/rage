@@ -113,6 +113,55 @@ impl MaterialKey {
             Color::Black
         }
     }
+
+    /// Whether the material is symmetric (same pieces on both sides).
+    pub fn is_symmetric(&self) -> bool {
+        self.counts[0] == self.counts[1]
+    }
+
+    /// Number of unique piece roles: roles where count == 1 on a side, summed
+    /// across both sides. Kings (always count=1 per side) add 2.
+    pub fn unique_pieces(&self) -> usize {
+        let mut count = 2; // both kings
+        for side in &self.counts {
+            for &c in side {
+                if c == 1 {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Minimum count among roles with count >= 2 (the smallest group of
+    /// identical pieces). Returns 0 if no such group exists.
+    pub fn min_like_man(&self) -> usize {
+        self.counts
+            .iter()
+            .flat_map(|s| s.iter())
+            .copied()
+            .filter(|&c| c >= 2)
+            .min()
+            .unwrap_or(0) as usize
+    }
+
+    /// White pawn count.
+    pub fn white_pawn_count(&self) -> u8 {
+        self.counts[0][0]
+    }
+
+    /// Black pawn count.
+    pub fn black_pawn_count(&self) -> u8 {
+        self.counts[1][0]
+    }
+
+    /// Generate table name with colors swapped (for matching asymmetric material).
+    pub fn table_name_swapped(&self) -> String {
+        let swapped = MaterialKey {
+            counts: [self.counts[1], self.counts[0]],
+        };
+        swapped.table_name()
+    }
 }
 
 #[cfg(test)]

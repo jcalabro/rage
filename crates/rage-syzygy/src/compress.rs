@@ -5,451 +5,443 @@
 //!    with new symbols, building a binary tree of expansions.
 //! 2. Huffman coding: Variable-length codes for the RE-PAIR symbols.
 //!
-//! To decompress a value at a given index:
-//! 1. Use the index table to find which block contains the index
-//! 2. Use the size table to find where the compressed block starts
-//! 3. Read Huffman-coded symbols from the bit stream
-//! 4. Recursively expand RE-PAIR symbols to get the literal value
+//! Reference: shakmaty-syzygy by niklasf.
 
 use crate::errors::{Result, SyzygyError};
+use crate::indexing::GroupData;
+
+// ---------------------------------------------------------------------------
+// Symbol tree
+// ---------------------------------------------------------------------------
+
+/// A node in the RE-PAIR symbol tree. Each symbol is 3 bytes packed.
+#[derive(Clone, Debug)]
+pub struct Symbol {
+    lr: [u8; 3],
+    pub len: u8,
+}
+
+impl Symbol {
+    fn new() -> Symbol {
+        Symbol { lr: [0; 3], len: 0 }
+    }
+
+    /// Left child index.
+    pub fn left(&self) -> u16 {
+        (u16::from(self.lr[1] & 0xf) << 8) | u16::from(self.lr[0])
+    }
+
+    /// Right child index.
+    pub fn right(&self) -> u16 {
+        (u16::from(self.lr[2]) << 4) | (u16::from(self.lr[1]) >> 4)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PairsData
+// ---------------------------------------------------------------------------
 
 /// Parsed compression parameters for a subtable.
 #[derive(Clone, Debug)]
 pub struct PairsData {
-    /// Index table: maps logical block index to sparse index offset.
-    pub index_table: Vec<u64>,
-    /// Size table: compressed size (in bytes) of each block.
-    pub size_table: Vec<u16>,
-    /// Span length for each block (number of values per block).
+    /// Encoding flags.
+    pub flags: u8,
+    /// Piece configuration encoding info.
+    pub groups: Option<GroupData>,
+
+    /// Block size in bytes (1 << header[1]).
     pub block_size: u32,
-    /// Number of blocks.
-    pub num_blocks: u32,
-    /// Symbol lengths (number of literal values each symbol expands to).
-    pub sym_len: Vec<u8>,
-    /// Symbol children: sym_pat[i] gives the left child, sym_pat[i] + sym_len offset
-    /// gives the right child. Leaf symbols represent literal values.
-    pub sym_pat: Vec<u16>,
-    /// Minimum symbol length in the Huffman code.
-    pub min_sym_len: u8,
-    /// Huffman decode table: base code for each length.
+    /// Span for sparse index (1 << header[2]).
+    pub span: u32,
+    /// Number of blocks in the table.
+    pub blocks_num: u32,
+
+    /// Minimum Huffman symbol length in bits.
+    pub min_symlen: u8,
+    /// Offset in file of the lowest_sym array (u16 LE entries).
+    pub lowest_sym: usize,
+    /// 64-bit padded base values for Huffman decoding.
     pub base: Vec<u64>,
-    /// Offset into symbol list for each code length.
-    pub offset: Vec<u16>,
-    /// Number of symbols.
-    pub num_syms: u32,
-    /// Offset in the file data where compressed blocks begin.
-    pub data_offset: usize,
-    /// Number of values in this subtable.
-    pub num_values: u64,
-    /// Single-value optimization: when true, the table stores a single value.
+    /// The symbol table (RE-PAIR tree nodes).
+    pub symbols: Vec<Symbol>,
+
+    /// Offset of the sparse index in the file.
+    pub sparse_index: usize,
+    /// Number of sparse index entries.
+    pub sparse_index_size: u32,
+
+    /// Offset of the block length table in the file.
+    pub block_lengths: usize,
+    /// Number of block length entries (blocks_num + padding).
+    pub block_length_size: u32,
+
+    /// Start of compressed data in the file.
+    pub data: usize,
+
+    /// For single-value tables: the stored value.
     pub single_value: Option<u8>,
 }
 
 impl PairsData {
-    /// Create a PairsData for a subtable that stores a single constant value.
+    /// Create a PairsData for a single-value subtable.
     pub fn single(value: u8) -> Self {
         Self {
-            index_table: Vec::new(),
-            size_table: Vec::new(),
+            flags: 0x80,
+            groups: None,
             block_size: 0,
-            num_blocks: 0,
-            sym_len: Vec::new(),
-            sym_pat: Vec::new(),
-            min_sym_len: 0,
+            span: 0,
+            blocks_num: 0,
+            min_symlen: value,
+            lowest_sym: 0,
             base: Vec::new(),
-            offset: Vec::new(),
-            num_syms: 0,
-            data_offset: 0,
-            num_values: 0,
+            symbols: Vec::new(),
+            sparse_index: 0,
+            sparse_index_size: 0,
+            block_lengths: 0,
+            block_length_size: 0,
+            data: 0,
             single_value: Some(value),
         }
     }
+
+    /// Total table size from groups.
+    pub fn tb_size(&self) -> u64 {
+        match &self.groups {
+            Some(g) => g.tb_size(),
+            None => 0,
+        }
+    }
 }
 
-/// Bit reader for reading variable-length Huffman codes from a byte stream.
-struct BitReader<'a> {
-    data: &'a [u8],
-    byte_pos: usize,
-    /// Bit buffer (holds up to 64 bits).
-    buf: u64,
-    /// Number of valid bits in the buffer.
-    buf_bits: u32,
-}
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
 
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8], byte_offset: usize) -> Self {
-        Self {
+/// Build the symbol table by reading the binary tree from file data.
+fn read_symbols(
+    data: &[u8],
+    btree_offset: usize,
+    symbols: &mut [Symbol],
+    visited: &mut [bool],
+    sym: u16,
+    depth: u8,
+) -> Result<()> {
+    let idx = sym as usize;
+    if idx >= symbols.len() || visited[idx] {
+        return Ok(());
+    }
+    if depth == 0 {
+        return Err(SyzygyError::Corrupted("symbol tree too deep".into()));
+    }
+
+    let off = btree_offset + idx * 3;
+    if off + 3 > data.len() {
+        return Err(SyzygyError::Corrupted("symbol tree truncated".into()));
+    }
+
+    let mut symbol = Symbol::new();
+    symbol.lr[0] = data[off];
+    symbol.lr[1] = data[off + 1];
+    symbol.lr[2] = data[off + 2];
+
+    if symbol.right() == 0xfff {
+        // Leaf node.
+        symbol.len = 0;
+    } else {
+        read_symbols(
             data,
-            byte_pos: byte_offset,
-            buf: 0,
-            buf_bits: 0,
-        }
+            btree_offset,
+            symbols,
+            visited,
+            symbol.left(),
+            depth - 1,
+        )?;
+        read_symbols(
+            data,
+            btree_offset,
+            symbols,
+            visited,
+            symbol.right(),
+            depth - 1,
+        )?;
+
+        let left_len = symbols[symbol.left() as usize].len;
+        let right_len = symbols[symbol.right() as usize].len;
+        symbol.len = left_len
+            .checked_add(right_len)
+            .and_then(|s| s.checked_add(1))
+            .ok_or_else(|| SyzygyError::Corrupted("symbol length overflow".into()))?;
     }
 
-    /// Ensure at least `n` bits are available in the buffer.
-    fn fill(&mut self, n: u32) {
-        while self.buf_bits < n {
-            if self.byte_pos < self.data.len() {
-                self.buf |= (self.data[self.byte_pos] as u64) << self.buf_bits;
-                self.byte_pos += 1;
-                self.buf_bits += 8;
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Peek at the next `n` bits without consuming them.
-    fn peek(&mut self, n: u32) -> u64 {
-        self.fill(n);
-        self.buf & ((1u64 << n) - 1)
-    }
-
-    /// Skip `n` bits.
-    fn skip(&mut self, n: u32) {
-        self.fill(n);
-        self.buf >>= n;
-        self.buf_bits -= n;
-    }
-
-    /// Read the next `n` bits and advance.
-    fn read(&mut self, n: u32) -> u64 {
-        let val = self.peek(n);
-        self.skip(n);
-        val
-    }
+    symbols[idx] = symbol;
+    visited[idx] = true;
+    Ok(())
 }
 
-/// Decompress a single value from a Syzygy subtable.
+/// Parse a pairs data header from file data at the given offset.
 ///
-/// `data` is the entire table file data.
-/// `pairs` is the parsed compression parameters.
-/// `index` is the logical index of the value to decompress.
-pub fn decompress_value(data: &[u8], pairs: &PairsData, index: u64) -> Result<u8> {
-    // Single-value optimization
-    if let Some(val) = pairs.single_value {
-        return Ok(val);
-    }
-
-    if pairs.block_size == 0 {
-        return Err(SyzygyError::Corrupted("block_size is 0".into()));
-    }
-
-    // Find which block contains this index
-    let block_idx = (index / pairs.block_size as u64) as usize;
-    let idx_within_block = (index % pairs.block_size as u64) as usize;
-
-    if block_idx >= pairs.index_table.len() {
-        return Err(SyzygyError::Corrupted(format!(
-            "block index {block_idx} out of range (max {})",
-            pairs.index_table.len()
-        )));
-    }
-
-    // Get the byte offset and bit offset for this block
-    let sparse_idx = pairs.index_table[block_idx];
-    let block_byte_offset = sparse_idx as usize;
-
-    // Each index_table entry points to the start of the compressed block data
-    // relative to data_offset
-    let abs_offset = pairs.data_offset + block_byte_offset;
-    if abs_offset >= data.len() {
-        return Err(SyzygyError::Corrupted("block offset out of file".into()));
-    }
-
-    let mut reader = BitReader::new(data, abs_offset);
-
-    // Skip to the desired value within the block by decoding symbols
-    let mut values_remaining = idx_within_block;
-    loop {
-        let sym = decode_huffman_symbol(&mut reader, pairs)?;
-        let sym_length = sym_expand_length(sym, pairs);
-
-        if values_remaining < sym_length as usize {
-            // The desired value is within this symbol's expansion
-            return expand_symbol_at(sym, values_remaining, pairs);
-        }
-        values_remaining -= sym_length as usize;
-    }
-}
-
-/// Decode one Huffman symbol from the bit stream.
-fn decode_huffman_symbol(reader: &mut BitReader<'_>, pairs: &PairsData) -> Result<u32> {
-    // Read bits one at a time, compare against base codes
-    let mut code = 0u64;
-    let mut len = pairs.min_sym_len as usize;
-
-    reader.fill(32); // prefill buffer
-
-    loop {
-        if len >= pairs.base.len() + pairs.min_sym_len as usize {
-            return Err(SyzygyError::Corrupted("Huffman code too long".into()));
-        }
-
-        let bit = reader.read(1);
-        code = (code << 1) | bit;
-
-        let base_idx = len - pairs.min_sym_len as usize;
-        if base_idx < pairs.base.len() && code <= pairs.base[base_idx] {
-            let offset_idx = base_idx;
-            if offset_idx < pairs.offset.len() {
-                let sym = (code as u32)
-                    .wrapping_sub(pairs.base[base_idx] as u32)
-                    .wrapping_add(pairs.offset[offset_idx] as u32);
-                if sym < pairs.num_syms {
-                    return Ok(sym);
-                }
-            }
-        }
-
-        len += 1;
-        if len > 64 {
-            return Err(SyzygyError::Corrupted("Huffman decode failed".into()));
-        }
-    }
-}
-
-/// Get the number of literal values a symbol expands to.
-fn sym_expand_length(sym: u32, pairs: &PairsData) -> u32 {
-    if (sym as usize) < pairs.sym_len.len() {
-        pairs.sym_len[sym as usize] as u32 + 1
-    } else {
-        1
-    }
-}
-
-/// Expand a RE-PAIR symbol and return the value at `offset` within the expansion.
-fn expand_symbol_at(sym: u32, offset: usize, pairs: &PairsData) -> Result<u8> {
-    // If this is a leaf (sym_len == 0), return the literal value
-    if (sym as usize) < pairs.sym_len.len() && pairs.sym_len[sym as usize] == 0 {
-        if offset != 0 {
-            return Err(SyzygyError::Corrupted("offset into leaf symbol".into()));
-        }
-        // The literal value is the symbol index itself (mod number of literals)
-        return Ok(sym as u8);
-    }
-
-    // Non-leaf: recurse into children
-    if (sym as usize) >= pairs.sym_pat.len() {
-        return Err(SyzygyError::Corrupted("symbol out of range".into()));
-    }
-
-    let left = pairs.sym_pat[sym as usize] as u32;
-    let left_len = sym_expand_length(left, pairs) as usize;
-
-    if offset < left_len {
-        expand_symbol_at(left, offset, pairs)
-    } else {
-        // Right child is stored as left + 1 in the symbol table
-        let right = left + 1;
-        expand_symbol_at(right, offset - left_len, pairs)
-    }
-}
-
-/// Parse compression parameters from the table file header.
-///
-/// `data` is the file data starting from the pairs-data section.
-/// `flags` indicates the encoding type (from the table header).
-/// `num_values` is the total number of values in this subtable.
-///
-/// Returns the PairsData and the number of bytes consumed from `data`.
-pub fn parse_pairs_data(data: &[u8], flags: u8, num_values: u64) -> Result<(PairsData, usize)> {
-    // Flag bit 7: single-value table
-    // Structure: byte 0 = flags (with 0x80 bit set), byte 1 = value
-    if flags & 0x80 != 0 {
-        if data.len() < 2 {
-            return Err(SyzygyError::Corrupted("single-value table too short".into()));
-        }
-        // Value is at byte 1
-        return Ok((PairsData::single(data[1]), 2));
-    }
-
-    if data.len() < 10 {
-        eprintln!("debug: pairs data too short: {} bytes", data.len());
-        return Err(SyzygyError::Corrupted(format!(
-            "pairs data too short: {} < 10",
-            data.len()
-        )));
-    }
-
-    let mut pos = 0;
-
-    // Byte 0: block_size_shift (log2 of block size)
-    let block_size_shift = data[pos];
-    pos += 1;
-
-    // Byte 1: min_sym_len
-    let min_sym_len = data[pos];
-    pos += 1;
-
-    // Bytes 2-3: number of Huffman code lengths
-    let num_lengths = read_u16_le(data, pos) as usize;
-    pos += 2;
-
-    let block_size = 1u32 << block_size_shift;
-
-    if block_size_shift > 30 {
-        return Err(SyzygyError::Corrupted(format!(
-            "block_size_shift too large: {}",
-            block_size_shift
-        )));
-    }
-
-    // Read Huffman code length distribution
-    if pos + num_lengths > data.len() {
+/// Returns `(PairsData, next_offset)`. The PairsData will have
+/// `sparse_index`, `block_lengths`, and `data` set to 0 — these are
+/// filled in later during the table-level offset assignment phase.
+pub fn parse_pairs_data(data: &[u8], ptr: usize, groups: GroupData) -> Result<(PairsData, usize)> {
+    if ptr >= data.len() {
         return Err(SyzygyError::Corrupted(
-            "code length distribution truncated".into(),
+            "pairs data offset out of range".into(),
         ));
     }
 
-    // Build base and offset tables for Huffman decoding
-    let mut base = Vec::with_capacity(num_lengths);
-    let mut offset = Vec::with_capacity(num_lengths);
-    let mut num_syms = 0u32;
+    let flags = data[ptr];
 
-    for i in 0..num_lengths {
-        if pos + i >= data.len() {
-            return Err(SyzygyError::Corrupted("code length distribution truncated".into()));
+    // Single-value table.
+    if flags & 0x80 != 0 {
+        if ptr + 1 >= data.len() {
+            return Err(SyzygyError::Corrupted(
+                "single-value table too short".into(),
+            ));
         }
-        let count = data[pos + i] as u32;
-        offset.push(num_syms as u16);
-        num_syms += count;
-        // Base code for this length
-        if i == 0 {
-            base.push((count as u64).wrapping_sub(1));
-        } else {
-            if base.is_empty() {
-                return Err(SyzygyError::Corrupted("huffman base table underflow".into()));
-            }
-            base.push(((base[i - 1] + 1) * 2 + count as u64).wrapping_sub(1));
-        }
-    }
-    pos += num_lengths;
-
-    // Pad to even byte boundary
-    if pos & 1 != 0 {
-        pos += 1;
+        let value = data[ptr + 1];
+        return Ok((PairsData::single(value), ptr + 2));
     }
 
-    // Read symbol patterns (RE-PAIR tree)
-    let sym_pat_size = num_syms as usize * 3; // 3 bytes per symbol entry
-    if pos + sym_pat_size > data.len() {
-        return Err(SyzygyError::Corrupted("symbol patterns truncated".into()));
+    // Full header: 10 bytes.
+    if ptr + 10 > data.len() {
+        return Err(SyzygyError::Corrupted(format!(
+            "pairs header too short at offset {ptr}"
+        )));
     }
 
-    let mut sym_pat = Vec::with_capacity(num_syms as usize);
-    let mut sym_len = Vec::with_capacity(num_syms as usize);
-    for i in 0..num_syms as usize {
-        let base_pos = pos + i * 3;
-        let left = read_u16_le(data, base_pos);
-        let len_byte = data[base_pos + 2];
-        sym_pat.push(left);
-        sym_len.push(len_byte);
-    }
-    pos += sym_pat_size;
+    let tb_size = groups.tb_size();
+    let block_size = 1u32
+        .checked_shl(u32::from(data[ptr + 1]))
+        .ok_or_else(|| SyzygyError::Corrupted("block_size overflow".into()))?;
+    let span = 1u32
+        .checked_shl(u32::from(data[ptr + 2]))
+        .ok_or_else(|| SyzygyError::Corrupted("span overflow".into()))?;
+    let sparse_index_size = tb_size.div_ceil(u64::from(span)) as u32;
+    let padding = data[ptr + 3];
+    let blocks_num =
+        u32::from_le_bytes([data[ptr + 4], data[ptr + 5], data[ptr + 6], data[ptr + 7]]);
+    let block_length_size = blocks_num
+        .checked_add(u32::from(padding))
+        .ok_or_else(|| SyzygyError::Corrupted("block_length_size overflow".into()))?;
 
-    // Pad to 8-byte boundary
-    pos = (pos + 7) & !7;
-
-    // Index table
-    // If num_values is an estimate and doesn't fit, try to infer from available space.
-    // Available bytes from current position: data.len() - pos
-    // For N blocks, we need: 6*(N+1) + 2*N = 8N + 6 bytes (index + size tables)
-    let mut num_blocks = if block_size > 0 {
-        num_values.div_ceil(block_size as u64) as u32
-    } else {
-        0
-    };
-
-    // If this doesn't fit, reduce num_blocks to fit available space
-    let available_bytes = (data.len() - pos) as u32;
-    let max_blocks_for_space = if available_bytes > 6 {
-        // 6*(N+1) + 2*N <= available => 8N + 6 <= available => N <= (available-6)/8
-        (available_bytes - 6) / 8
-    } else {
-        0
-    };
-
-    let actual_num_values = if num_blocks > max_blocks_for_space {
-        eprintln!(
-            "Reducing num_blocks from {} to {} to fit available {} bytes",
-            num_blocks, max_blocks_for_space, available_bytes
-        );
-        num_blocks = max_blocks_for_space;
-        // Recalculate num_values to match the blocks we can actually read
-        if num_blocks > 0 && block_size > 0 {
-            let adjusted = (num_blocks as u64) * (block_size as u64);
-            eprintln!("Adjusted num_values from {} to {}", num_values, adjusted);
-            adjusted
-        } else {
-            num_values
-        }
-    } else {
-        num_values
-    };
-
-    let index_entries = (num_blocks as usize + 1).max(1);
-    let index_size = index_entries * 6; // 6 bytes per entry (48-bit)
-    if pos + index_size > data.len() {
-        return Err(SyzygyError::Corrupted("index table truncated".into()));
+    let max_symlen = data[ptr + 8];
+    let min_symlen = data[ptr + 9];
+    if max_symlen > 32 || min_symlen > 32 || max_symlen < min_symlen {
+        return Err(SyzygyError::Corrupted(format!(
+            "invalid symlen: min={min_symlen}, max={max_symlen}"
+        )));
     }
 
-    let mut index_table = Vec::with_capacity(index_entries);
-    for i in 0..index_entries {
-        let off = pos + i * 6;
-        let val = read_u48_le(data, off);
-        index_table.push(val);
-    }
-    pos += index_size;
+    let h = (max_symlen - min_symlen + 1) as usize;
+    let lowest_sym = ptr + 10;
 
-    // Size table
-    let size_entries = num_blocks as usize;
-    let size_table_size = size_entries * 2;
-    if pos + size_table_size > data.len() {
-        return Err(SyzygyError::Corrupted("size table truncated".into()));
+    // Build base array from the lowest_sym entries.
+    if lowest_sym + h * 2 > data.len() {
+        return Err(SyzygyError::Corrupted("lowest_sym table truncated".into()));
     }
 
-    let mut size_table = Vec::with_capacity(size_entries);
-    for i in 0..size_entries {
-        size_table.push(read_u16_le(data, pos + i * 2));
+    let mut base = vec![0u64; h];
+    // Compute base values (working backwards).
+    for i in (0..h.saturating_sub(1)).rev() {
+        let off = lowest_sym + i * 2;
+        let this_val = u64::from(u16::from_le_bytes([data[off], data[off + 1]]));
+        let next_val = u64::from(u16::from_le_bytes([data[off + 2], data[off + 3]]));
+        base[i] = (base[i + 1] + this_val - next_val) / 2;
     }
-    pos += size_table_size;
+    // Left-shift each base to fill 64 bits.
+    for (i, b) in base.iter_mut().enumerate() {
+        let shift = 64u32.saturating_sub(u32::from(min_symlen) + i as u32);
+        *b = b.checked_shl(shift).unwrap_or(0);
+    }
 
-    // Data starts at current position (compressed blocks)
-    let data_offset = pos;
+    // Read symbol count and build symbol table.
+    let sym_ptr = lowest_sym + h * 2;
+    if sym_ptr + 2 > data.len() {
+        return Err(SyzygyError::Corrupted("symbol count truncated".into()));
+    }
+    let num_syms = u16::from_le_bytes([data[sym_ptr], data[sym_ptr + 1]]) as usize;
+    let btree = sym_ptr + 2;
+
+    if btree + num_syms * 3 > data.len() {
+        return Err(SyzygyError::Corrupted("symbol tree truncated".into()));
+    }
+
+    let mut symbols = vec![Symbol::new(); num_syms];
+    let mut visited = vec![false; num_syms];
+    for s in 0..num_syms as u16 {
+        read_symbols(data, btree, &mut symbols, &mut visited, s, 16)?;
+    }
+
+    let next = btree + num_syms * 3 + (num_syms & 1);
 
     Ok((
         PairsData {
-            index_table,
-            size_table,
+            flags,
+            groups: Some(groups),
             block_size,
-            num_blocks,
-            sym_len,
-            sym_pat,
-            min_sym_len,
+            span,
+            blocks_num,
+            min_symlen,
+            lowest_sym,
             base,
-            offset,
-            num_syms,
-            data_offset,
-            num_values: actual_num_values,
+            symbols,
+            sparse_index: 0,
+            sparse_index_size,
+            block_lengths: 0,
+            block_length_size,
+            data: 0,
             single_value: None,
         },
-        pos,
+        next,
     ))
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Decompression
 // ---------------------------------------------------------------------------
 
-fn read_u16_le(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([data[offset], data[offset + 1]])
-}
+/// Decompress a single value from a Syzygy subtable.
+pub fn decompress_value(data: &[u8], d: &PairsData, idx: u64) -> Result<u8> {
+    // Single-value optimization.
+    if d.single_value.is_some() {
+        return Ok(d.min_symlen);
+    }
 
-fn read_u48_le(data: &[u8], offset: usize) -> u64 {
-    let mut bytes = [0u8; 8];
-    bytes[..6].copy_from_slice(&data[offset..offset + 6]);
-    u64::from_le_bytes(bytes)
+    // Sparse index lookup: find the approximate block.
+    let main_idx = (idx / u64::from(d.span)) as usize;
+    let si_off = d.sparse_index + main_idx * 6;
+    if si_off + 6 > data.len() {
+        return Err(SyzygyError::Corrupted("sparse index out of range".into()));
+    }
+    let block = u32::from_le_bytes([
+        data[si_off],
+        data[si_off + 1],
+        data[si_off + 2],
+        data[si_off + 3],
+    ]);
+    let offset = i64::from(u16::from_le_bytes([data[si_off + 4], data[si_off + 5]]));
+
+    let mut lit_idx = idx as i64 % i64::from(d.span) - i64::from(d.span) / 2 + offset;
+    let mut block = block;
+
+    // Walk block lengths to find the exact block.
+    if lit_idx < 0 {
+        loop {
+            if block == 0 {
+                return Err(SyzygyError::Corrupted("block underflow".into()));
+            }
+            block -= 1;
+            let bl_off = d.block_lengths + block as usize * 2;
+            if bl_off + 2 > data.len() {
+                return Err(SyzygyError::Corrupted("block length out of range".into()));
+            }
+            lit_idx += i64::from(u16::from_le_bytes([data[bl_off], data[bl_off + 1]])) + 1;
+            if lit_idx >= 0 {
+                break;
+            }
+        }
+    } else {
+        loop {
+            let bl_off = d.block_lengths + block as usize * 2;
+            if bl_off + 2 > data.len() {
+                return Err(SyzygyError::Corrupted("block length out of range".into()));
+            }
+            let block_length = i64::from(u16::from_le_bytes([data[bl_off], data[bl_off + 1]])) + 1;
+            if lit_idx < block_length {
+                break;
+            }
+            lit_idx -= block_length;
+            block += 1;
+        }
+    }
+
+    // Read the compressed block into a buffer (block_size + 4 bytes for refill).
+    let block_data_start = d.data + block as usize * d.block_size as usize;
+    let block_data_end = block_data_start + d.block_size as usize + 4;
+    if block_data_end > data.len() {
+        return Err(SyzygyError::Corrupted("block data out of range".into()));
+    }
+    let block_data = &data[block_data_start..block_data_end];
+
+    // Big-endian Huffman decoding.
+    let mut buf = u64::from_be_bytes([
+        block_data[0],
+        block_data[1],
+        block_data[2],
+        block_data[3],
+        block_data[4],
+        block_data[5],
+        block_data[6],
+        block_data[7],
+    ]);
+    let mut buf_size = 64usize;
+    let mut cursor = 8usize; // next byte to read from block_data
+
+    let mut sym;
+
+    loop {
+        // Find the Huffman symbol.
+        let mut len = 0;
+        while len < d.base.len() && buf < d.base[len] {
+            len += 1;
+        }
+        if len >= d.base.len() {
+            return Err(SyzygyError::Corrupted("Huffman decode failed".into()));
+        }
+
+        sym = ((buf - d.base[len]) >> (64 - len - usize::from(d.min_symlen))) as u16;
+        // Add the lowest_sym offset for this code length.
+        let ls_off = d.lowest_sym + len * 2;
+        if ls_off + 2 > data.len() {
+            return Err(SyzygyError::Corrupted(
+                "lowest_sym read out of range".into(),
+            ));
+        }
+        sym += u16::from_le_bytes([data[ls_off], data[ls_off + 1]]);
+
+        if sym as usize >= d.symbols.len() {
+            return Err(SyzygyError::Corrupted("symbol index out of range".into()));
+        }
+
+        if lit_idx < i64::from(d.symbols[sym as usize].len) + 1 {
+            break;
+        }
+
+        lit_idx -= i64::from(d.symbols[sym as usize].len) + 1;
+        let consumed = usize::from(d.min_symlen) + len;
+        buf <<= consumed;
+        buf_size -= consumed;
+
+        // Refill buffer.
+        if buf_size <= 32 && cursor + 4 <= block_data.len() {
+            let refill = u64::from(u32::from_be_bytes([
+                block_data[cursor],
+                block_data[cursor + 1],
+                block_data[cursor + 2],
+                block_data[cursor + 3],
+            ]));
+            buf |= refill << (64 - buf_size - 32);
+            buf_size += 32;
+            cursor += 4;
+        }
+    }
+
+    // Expand the RE-PAIR symbol to find the literal at lit_idx.
+    let mut symbol = &d.symbols[sym as usize];
+    loop {
+        if symbol.len == 0 {
+            return Ok(symbol.left() as u8);
+        }
+
+        let left = &d.symbols[symbol.left() as usize];
+        if lit_idx < i64::from(left.len) + 1 {
+            symbol = left;
+        } else {
+            lit_idx -= i64::from(left.len) + 1;
+            symbol = &d.symbols[symbol.right() as usize];
+        }
+    }
 }
 
 #[cfg(test)]
@@ -461,7 +453,6 @@ mod tests {
     fn single_value_table() {
         let pairs = PairsData::single(2);
         assert_eq!(pairs.single_value, Some(2));
-        // Any index returns the single value
         let result = decompress_value(&[], &pairs, 0).unwrap();
         assert_eq!(result, 2);
         let result = decompress_value(&[], &pairs, 42).unwrap();
@@ -469,29 +460,14 @@ mod tests {
     }
 
     #[test]
-    fn bit_reader_basic() {
-        let data = [0b10110100u8, 0b01101001u8];
-        let mut reader = BitReader::new(&data, 0);
-
-        // Read 4 bits: should get 0b0100 = 4 (LSB first)
-        let v = reader.read(4);
-        assert_eq!(v, 0b0100);
-
-        // Read 4 more: should get 0b1011 = 11
-        let v = reader.read(4);
-        assert_eq!(v, 0b1011);
-    }
-
-    #[test]
-    fn read_u16_le_basic() {
-        let data = [0x34, 0x12];
-        assert_eq!(read_u16_le(&data, 0), 0x1234);
-    }
-
-    #[test]
-    fn read_u48_le_basic() {
-        let data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
-        let val = read_u48_le(&data, 0);
-        assert_eq!(val, 0x0006_0504_0302_01);
+    fn symbol_left_right() {
+        let s = Symbol {
+            lr: [0xAB, 0xCD, 0xEF],
+            len: 5,
+        };
+        // left = (0xD & 0xf) << 8 | 0xAB = 0xDAB
+        assert_eq!(s.left(), 0xDAB);
+        // right = 0xEF << 4 | 0xC >> 4 = 0xEFC
+        assert_eq!(s.right(), 0xEFC);
     }
 }

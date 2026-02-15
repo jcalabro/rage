@@ -64,9 +64,6 @@ impl Wdl {
 }
 
 /// Distance to zeroing move (pawn move or capture).
-/// Positive = winning (number of moves until forced zeroing),
-/// Negative = losing.
-/// Zero = draw or position is itself a zeroing position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Dtz(pub i32);
 
@@ -84,14 +81,7 @@ impl Dtz {
 }
 
 /// Probe the WDL value for the given position.
-///
-/// Returns `None` if the position cannot be probed (too many pieces,
-/// castling rights, missing table, etc.).
-///
-/// The position must NOT have castling rights and must have at most
-/// `tablebase.probe_limit` pieces.
 pub fn probe_wdl(board: &mut Board, tablebase: &Tablebase) -> Option<Wdl> {
-    // Check preconditions
     if board.castling_rights().bits() != 0 {
         return None;
     }
@@ -102,34 +92,26 @@ pub fn probe_wdl(board: &mut Board, tablebase: &Tablebase) -> Option<Wdl> {
     }
 
     if total_pieces < 3 {
-        return None; // KvK is always draw, handled by insufficient material
+        return None;
     }
 
-    // Get material key and table name
     let mat_key = MaterialKey::from_board(board);
     let table_name = mat_key.table_name();
 
-    // Try to load the WDL table
     if tablebase.get_wdl(&table_name).is_err() {
         return None;
     }
 
-    // Handle en passant: if EP is possible, we need to probe both with and
-    // without EP to get the correct result
     if board.en_passant_square().is_some() {
         return probe_wdl_with_ep(board, tablebase, &table_name);
     }
 
-    // Normal probe
     probe_wdl_direct(board, tablebase, &table_name)
 }
 
-/// Probe WDL by generating all moves, making each, and recursively probing.
-/// This handles the "after zeroing" semantics of Syzygy tables.
 fn probe_wdl_direct(board: &mut Board, tablebase: &Tablebase, table_name: &str) -> Option<Wdl> {
-    // Generate all captures (zeroing moves for WDL)
     let moves = board.generate_legal_moves();
-    let mut best_wdl = Wdl::Loss; // worst case
+    let mut best_wdl = Wdl::Loss;
     let mut found_capture = false;
 
     for m in &moves {
@@ -153,12 +135,10 @@ fn probe_wdl_direct(board: &mut Board, tablebase: &Tablebase, table_name: &str) 
         }
     }
 
-    // If no captures exist, look up directly in the table
     if !found_capture {
         return probe_table_value(board, tablebase, table_name);
     }
 
-    // Also check the table value (for non-capture positions)
     if let Some(table_wdl) = probe_table_value(board, tablebase, table_name)
         && table_wdl as u8 > best_wdl as u8
     {
@@ -168,10 +148,7 @@ fn probe_wdl_direct(board: &mut Board, tablebase: &Tablebase, table_name: &str) 
     Some(best_wdl)
 }
 
-/// Probe WDL when en passant is possible.
 fn probe_wdl_with_ep(board: &mut Board, tablebase: &Tablebase, table_name: &str) -> Option<Wdl> {
-    // Probe without EP first (as if EP wasn't available)
-    // Then check EP captures separately
     let mut best_wdl = Wdl::Loss;
 
     let moves = board.generate_legal_moves();
@@ -193,7 +170,6 @@ fn probe_wdl_with_ep(board: &mut Board, tablebase: &Tablebase, table_name: &str)
         }
     }
 
-    // Also check table value directly
     if let Some(table_wdl) = probe_table_value(board, tablebase, table_name)
         && table_wdl as u8 > best_wdl as u8
     {
@@ -203,8 +179,6 @@ fn probe_wdl_with_ep(board: &mut Board, tablebase: &Tablebase, table_name: &str)
     Some(best_wdl)
 }
 
-/// Probe WDL for a position after a move has been made.
-/// Handles material changes (captures may change the table to probe).
 fn probe_wdl_after_move(board: &mut Board, tablebase: &Tablebase) -> Option<Wdl> {
     let total_pieces = board.occupied().popcount();
     if total_pieces > tablebase.probe_limit || total_pieces < 3 {
@@ -222,59 +196,30 @@ fn probe_wdl_after_move(board: &mut Board, tablebase: &Tablebase) -> Option<Wdl>
 }
 
 /// Look up the raw WDL value for a position in the table.
-///
-/// This performs the actual table lookup: normalizes the position,
-/// computes the index, and decompresses the value.
 fn probe_table_value(board: &Board, tablebase: &Tablebase, table_name: &str) -> Option<Wdl> {
     use crate::compress::decompress_value;
     use crate::indexing::encode_position;
 
     tablebase.read_wdl(table_name, |table| {
-        eprintln!(
-            "Table: {} subtables, {} pieces, pawns={}",
-            table.pairs.len(),
-            table.num_pieces,
-            table.has_pawns
-        );
-        let (subtable_idx, index) = encode_position(board, table)?;
-        eprintln!("Encoded: subtable={}, index={}", subtable_idx, index);
-        if subtable_idx >= table.pairs.len() {
-            eprintln!("subtable_idx out of range");
+        let (side_idx, index) = encode_position(board, table)?;
+
+        if side_idx >= table.files[0].sides.len() {
             return None;
         }
-        let pairs = &table.pairs[subtable_idx];
-        eprintln!(
-            "PairsData: single_value={:?}, block_size={}, num_blocks={}, num_values={}",
-            pairs.single_value, pairs.block_size, pairs.num_blocks, pairs.num_values
-        );
-        // Check if the encoded index is within the actual table size
-        // (might be reduced due to file size constraints).
-        // Skip this check for single-value tables which have num_values=0.
-        if pairs.single_value.is_none() && pairs.num_values > 0 && index >= pairs.num_values {
-            eprintln!(
-                "Index {} out of range (table has {} values)",
-                index, pairs.num_values
-            );
-            return None;
-        }
+
+        let pairs = &table.files[0].sides[side_idx].pairs;
+
         let raw = match decompress_value(&table.data, pairs, index) {
             Ok(val) => val,
-            Err(e) => {
-                eprintln!("Decompress error: {}", e);
-                return None;
-            }
+            Err(_) => return None,
         };
-        eprintln!("Decompressed: {}", raw);
+
         Wdl::from_raw(raw)
     })?
 }
 
 /// Probe DTZ (Distance To Zeroing) for root move filtering.
-///
-/// Returns the DTZ value, which indicates how many moves until a zeroing
-/// move (capture or pawn move) is required to make progress.
 pub fn probe_dtz(board: &mut Board, tablebase: &Tablebase) -> Option<Dtz> {
-    // Check preconditions
     if board.castling_rights().bits() != 0 {
         return None;
     }
@@ -284,33 +229,26 @@ pub fn probe_dtz(board: &mut Board, tablebase: &Tablebase) -> Option<Dtz> {
         return None;
     }
 
-    // First get WDL value
     let wdl = probe_wdl(board, tablebase)?;
 
-    // For draws, DTZ is 0
     if wdl == Wdl::Draw || wdl == Wdl::BlessedLoss || wdl == Wdl::CursedWin {
         return Some(Dtz(0));
     }
 
-    // For wins/losses, try to get the DTZ from the table
     let mat_key = MaterialKey::from_board(board);
     let table_name = mat_key.table_name();
 
     if tablebase.get_dtz(&table_name).is_err() {
-        // If no DTZ table available, return a rough estimate from WDL
         return Some(Dtz(wdl.to_score()));
     }
 
-    // Try to find the DTZ value via move probing
     probe_dtz_via_moves(board, tablebase, wdl)
 }
 
-/// Probe DTZ by examining all legal moves and finding the best one.
 fn probe_dtz_via_moves(board: &mut Board, tablebase: &Tablebase, root_wdl: Wdl) -> Option<Dtz> {
     let moves = board.generate_legal_moves();
 
     if root_wdl == Wdl::Win {
-        // We're winning: find the move that minimizes DTZ
         let mut best_dtz = i32::MAX;
 
         for m in &moves {
@@ -326,7 +264,6 @@ fn probe_dtz_via_moves(board: &mut Board, tablebase: &Tablebase, root_wdl: Wdl) 
             if let Some(wdl) = child_wdl {
                 let negated = wdl.negate();
                 if negated == Wdl::Win {
-                    // This move maintains our winning position
                     let dtz = if is_zeroing { 1 } else { 2 };
                     if dtz < best_dtz {
                         best_dtz = dtz;
@@ -339,7 +276,6 @@ fn probe_dtz_via_moves(board: &mut Board, tablebase: &Tablebase, root_wdl: Wdl) 
             return Some(Dtz(best_dtz));
         }
     } else if root_wdl == Wdl::Loss {
-        // We're losing: find the move that maximizes |DTZ| (delays the loss)
         let mut best_dtz = 0i32;
 
         for m in &moves {
@@ -353,7 +289,6 @@ fn probe_dtz_via_moves(board: &mut Board, tablebase: &Tablebase, root_wdl: Wdl) 
             board.unmake_move(*m);
 
             if child_wdl.is_some() {
-                // Any non-losing move is good when we're losing
                 let dtz = if is_zeroing { -1 } else { -2 };
                 if dtz < best_dtz {
                     best_dtz = dtz;
@@ -368,15 +303,6 @@ fn probe_dtz_via_moves(board: &mut Board, tablebase: &Tablebase, root_wdl: Wdl) 
 }
 
 /// Filter root moves based on DTZ values.
-///
-/// Given a list of legal moves and their DTZ probes, returns the moves
-/// that maintain the best outcome.
-///
-/// - In winning positions: only include moves that lead to the fastest win
-///   (minimum DTZ) that maintain a winning WDL
-/// - In drawn positions: only include moves that maintain a draw
-/// - In losing positions: include moves that delay the loss the longest
-///   (maximum |DTZ|)
 pub fn filter_root_moves(
     board: &mut Board,
     tablebase: &Tablebase,
@@ -399,10 +325,8 @@ pub fn filter_root_moves(
         scored_moves.push((m, child_wdl));
     }
 
-    // Filter based on root WDL
     match root_wdl {
         Wdl::Win | Wdl::CursedWin => {
-            // Keep only winning moves (or cursed wins if that's the best)
             let best = scored_moves
                 .iter()
                 .map(|(_, w)| *w as u8)
@@ -413,29 +337,17 @@ pub fn filter_root_moves(
                 .filter(|(_, w)| *w as u8 >= best)
                 .collect()
         }
-        Wdl::Draw => {
-            // Keep only drawing moves (or better)
-            scored_moves
-                .into_iter()
-                .filter(|(_, w)| *w as u8 >= Wdl::Draw as u8)
-                .collect()
-        }
-        Wdl::BlessedLoss | Wdl::Loss => {
-            // Keep all moves (in losing positions, any move is acceptable)
-            scored_moves
-        }
+        Wdl::Draw => scored_moves
+            .into_iter()
+            .filter(|(_, w)| *w as u8 >= Wdl::Draw as u8)
+            .collect(),
+        Wdl::BlessedLoss | Wdl::Loss => scored_moves,
     }
 }
 
 /// Convert a WDL probe result to a search score.
-///
-/// Win/Loss scores are set to tablebase-win values (below mate but above
-/// any positional evaluation).
 pub fn wdl_to_score(wdl: Wdl, ply: u32) -> i32 {
-    // Use scores that are distinguishable from mate scores but clearly
-    // winning/losing. TB_WIN = MATE_SCORE - MAX_PLY - 1 ensures we
-    // prefer shorter mates over TB wins.
-    const TB_WIN: i32 = 30000 - 128 - 1; // MATE_SCORE - MAX_PLY - 1
+    const TB_WIN: i32 = 30000 - 128 - 1;
 
     match wdl {
         Wdl::Win => TB_WIN - ply as i32,
@@ -492,7 +404,6 @@ mod tests {
     fn wdl_to_score_ply_adjustment() {
         let score_ply0 = wdl_to_score(Wdl::Win, 0);
         let score_ply5 = wdl_to_score(Wdl::Win, 5);
-        // Closer wins score higher
         assert!(score_ply0 > score_ply5);
     }
 
@@ -512,7 +423,6 @@ mod tests {
 
     #[test]
     fn probe_wdl_too_many_pieces_returns_none() {
-        // KQRBNPvKQRBNP = 12 pieces, way over limit
         let mut board = Board::from_fen("rnbqk3/pppp4/8/8/8/8/PPPP4/RNBQK3 w - - 0 1").unwrap();
         let tb = Tablebase::new("");
         assert_eq!(probe_wdl(&mut board, &tb), None);
@@ -520,7 +430,6 @@ mod tests {
 
     #[test]
     fn probe_wdl_empty_tablebase_returns_none() {
-        // Valid 3-piece position but no tables available
         let mut board = Board::from_fen("4k3/8/8/8/8/8/8/4K2R w - - 0 1").unwrap();
         let tb = Tablebase::new("");
         assert_eq!(probe_wdl(&mut board, &tb), None);
@@ -539,112 +448,63 @@ mod tests {
         let tb_path = extract_embedded_tables().expect("failed to extract tables");
         let tb = crate::Tablebase::new(tb_path.to_str().unwrap());
 
-        // Try KQvK which has more data than KRvK
         let has_table = tb.has_wdl("KQvK");
-        eprintln!("Has KQvK table: {has_table}");
         assert!(has_table);
 
-        // Load the table
         let result = tb.get_wdl("KQvK");
-        eprintln!("Load result: {result:?}");
         assert!(result.is_ok());
 
-        // KQvK: White king e1, queen d1, black king e8
-        // White wins with queen
+        // KQvK: White king e2, queen d2, black king e8 — white wins
         let mut board = Board::from_fen("4k3/8/8/8/8/8/3QK3/8 w - - 0 1").unwrap();
-
         let result = probe_wdl(&mut board, &tb);
-        eprintln!("Probe result: {result:?}");
-        // Result should be Win or similar
-        if result.is_none() {
-            panic!("probe_wdl returned None");
-        }
+        assert!(result.is_some(), "probe_wdl returned None for KQvK");
     }
 
     #[test]
     fn probe_real_table_krvkr() {
-        // Load real Syzygy table (KRvKR is split/symmetric, 4 pieces, 13KB)
         let tb = crate::Tablebase::new("/tmp/rage-syzygy");
 
-        let has_table = tb.has_wdl("KRvKR");
-        eprintln!("Has KRvKR table: {has_table}");
-        if !has_table {
-            eprintln!("Skipping test - real table not available");
+        if !tb.has_wdl("KRvKR") {
             return;
         }
 
-        // Load the table
         let result = tb.get_wdl("KRvKR");
-        eprintln!("Load result: {result:?}");
         assert!(result.is_ok(), "Failed to load KRvKR table");
 
-        // KRvKR: White king e1, rook a1, Black king e8, rook e7
-        // Should be a draw (symmetric rook endgame)
         let mut board = Board::from_fen("3rk3/8/8/8/8/8/R3K3/8 w - - 0 1").unwrap();
-
         let result = probe_wdl(&mut board, &tb);
-        eprintln!("Probe result: {result:?}");
-        // Should return Some value
         assert!(result.is_some(), "probe_wdl returned None for KRvKR");
     }
 
     #[test]
-    fn probe_real_table_kbvkb_complex_pairs() {
-        // Load real Syzygy table (KBvKB has complex pairs data, not just single-value)
+    fn probe_real_table_kbvkb() {
         let tb = crate::Tablebase::new("/tmp/rage-syzygy");
 
-        let has_table = tb.has_wdl("KBvKB");
-        eprintln!("Has KBvKB table: {has_table}");
-        if !has_table {
-            eprintln!("Skipping test - real table not available");
+        if !tb.has_wdl("KBvKB") {
             return;
         }
 
-        // Load the table
         let result = tb.get_wdl("KBvKB");
-        eprintln!("Load result: {result:?}");
         assert!(result.is_ok(), "Failed to load KBvKB table");
 
-        // KBvKB: White king a1, bishop a2, Black king a8, bishop a7
-        // Two bishops of same color = draw (unless tactical)
         let mut board = Board::from_fen("B6k/b7/8/8/8/8/8/K7 w - - 0 1").unwrap();
-
         let result = probe_wdl(&mut board, &tb);
-        eprintln!("Probe result: {result:?}");
-        // Should return Some value
         assert!(result.is_some(), "probe_wdl returned None for KBvKB");
     }
 
     #[test]
-    #[ignore]  // Complex pairs parsing needs encode_position fix
-    fn probe_real_table_knvkn_complex_only() {
-        // Load real Syzygy table (KNvKN has ONLY complex pairs, no single-value)
-        // This test is ignored because encode_position produces indices that exceed
-        // the actual table size. The mismatch occurs because:
-        // - encode_position estimates using piece counts: 10*63*62 = 39,060 positions
-        // - parse_pairs_data adjusts to actual file size: 131 blocks * 64 = 8,384 positions
-        // These must be reconciled for complex pairs tables to work properly.
+    fn probe_real_table_knvkn() {
         let tb = crate::Tablebase::new("/tmp/rage-syzygy");
 
-        let has_table = tb.has_wdl("KNvKN");
-        eprintln!("Has KNvKN table: {has_table}");
-        if !has_table {
-            eprintln!("Skipping test - real table not available");
+        if !tb.has_wdl("KNvKN") {
             return;
         }
 
-        // Load the table
         let result = tb.get_wdl("KNvKN");
-        eprintln!("Load result: {result:?}");
         assert!(result.is_ok(), "Failed to load KNvKN table");
 
-        // KNvKN: White king a1, knight b3, Black king h8, knight g6
-        // Knight vs knight = always draw (sufficient material check)
         let mut board = Board::from_fen("6k1/8/6n1/8/8/1N6/8/K7 w - - 0 1").unwrap();
-
         let result = probe_wdl(&mut board, &tb);
-        eprintln!("Probe result: {result:?}");
-        // Should return Some value
         assert!(result.is_some(), "probe_wdl returned None for KNvKN");
     }
 }
