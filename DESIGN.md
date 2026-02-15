@@ -692,21 +692,7 @@ Add endgame perfection.
 **Exit criteria**: Correct probing verified against known positions. Measurable
 strength gain in endgames.
 
-### Phase 6: Wasm
-Browser deployment.
-
-1. Ensure `rage-core` compiles to wasm cleanly
-2. wasm SIMD implementation for NNUE
-3. Train and export lite model weights
-4. `wasm-bindgen` API
-5. JavaScript/TypeScript wrapper package
-6. Size optimization (wasm-opt, LTO)
-7. Integration tests in headless browser
-
-**Exit criteria**: Engine runs in the browser, plays reasonable chess with lite
-weights, total payload < 6 MB.
-
-### Phase 7: Strength Testing Framework (`rage-test`)
+### Phase 6: Strength Testing Framework (`rage-test`)
 Build the infrastructure for rigorous strength measurement.
 
 1. UCI engine subprocess management (spawn, communicate, handle crashes/timeouts)
@@ -721,6 +707,20 @@ Build the infrastructure for rigorous strength measurement.
 10. Tournament mode (round-robin, gauntlet)
 
 **Exit criteria**: Can run statistically valid SPRT tests. Results match cutechess-cli
+
+### Phase 7: Wasm
+Browser deployment.
+
+1. Ensure `rage-core` compiles to wasm cleanly
+2. wasm SIMD implementation for NNUE
+3. Train and export lite model weights
+4. `wasm-bindgen` API
+5. JavaScript/TypeScript wrapper package
+6. Size optimization (wasm-opt, LTO)
+7. Integration tests in wasmtime
+
+**Exit criteria**: Engine runs in the browser, plays reasonable chess with lite
+weights, total payload < 6 MB.
 for the same engine pair and TC. Clean, informative CLI output.
 
 ### Phase 8: Polish and Strength

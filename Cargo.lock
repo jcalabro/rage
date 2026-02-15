@@ -4440,6 +4440,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rage-test"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "crossterm",
+ "rage-core",
+ "rand 0.8.5",
+ "ratatui",
+ "rusqlite",
+]
+
+[[package]]
 name = "rage-train"
 version = "0.1.0"
 dependencies = [
