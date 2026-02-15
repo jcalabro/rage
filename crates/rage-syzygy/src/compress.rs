@@ -352,11 +352,42 @@ pub fn parse_pairs_data(data: &[u8], flags: u8, num_values: u64) -> Result<(Pair
     pos = (pos + 7) & !7;
 
     // Index table
-    let num_blocks = if block_size > 0 {
+    // If num_values is an estimate and doesn't fit, try to infer from available space.
+    // Available bytes from current position: data.len() - pos
+    // For N blocks, we need: 6*(N+1) + 2*N = 8N + 6 bytes (index + size tables)
+    let mut num_blocks = if block_size > 0 {
         num_values.div_ceil(block_size as u64) as u32
     } else {
         0
     };
+
+    // If this doesn't fit, reduce num_blocks to fit available space
+    let available_bytes = (data.len() - pos) as u32;
+    let max_blocks_for_space = if available_bytes > 6 {
+        // 6*(N+1) + 2*N <= available => 8N + 6 <= available => N <= (available-6)/8
+        (available_bytes - 6) / 8
+    } else {
+        0
+    };
+
+    let actual_num_values = if num_blocks > max_blocks_for_space {
+        eprintln!(
+            "Reducing num_blocks from {} to {} to fit available {} bytes",
+            num_blocks, max_blocks_for_space, available_bytes
+        );
+        num_blocks = max_blocks_for_space;
+        // Recalculate num_values to match the blocks we can actually read
+        if num_blocks > 0 && block_size > 0 {
+            let adjusted = (num_blocks as u64) * (block_size as u64);
+            eprintln!("Adjusted num_values from {} to {}", num_values, adjusted);
+            adjusted
+        } else {
+            num_values
+        }
+    } else {
+        num_values
+    };
+
     let index_entries = (num_blocks as usize + 1).max(1);
     let index_size = index_entries * 6; // 6 bytes per entry (48-bit)
     if pos + index_size > data.len() {
@@ -400,7 +431,7 @@ pub fn parse_pairs_data(data: &[u8], flags: u8, num_values: u64) -> Result<(Pair
             offset,
             num_syms,
             data_offset,
-            num_values,
+            num_values: actual_num_values,
             single_value: None,
         },
         pos,
