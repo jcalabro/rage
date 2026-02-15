@@ -389,6 +389,55 @@ mod tests {
         }
     }
 
+    // --- NEON tests (aarch64 only) ---
+
+    #[cfg(target_arch = "aarch64")]
+    mod neon_tests {
+        use super::*;
+
+        #[test]
+        fn neon_accumulator_add_matches_scalar() {
+            for seed in 1..=10u64 {
+                let mut acc_scalar = random_i16_array(seed);
+                let mut acc_neon = acc_scalar;
+                let weights = random_i16_array(seed + 100);
+
+                scalar::ScalarOps.accumulator_add(&mut acc_scalar, &weights);
+                super::super::neon::NeonOps.accumulator_add(&mut acc_neon, &weights);
+                assert_eq!(acc_scalar, acc_neon, "add mismatch for seed {seed}");
+            }
+        }
+
+        #[test]
+        fn neon_accumulator_sub_matches_scalar() {
+            for seed in 1..=10u64 {
+                let mut acc_scalar = random_i16_array(seed);
+                let mut acc_neon = acc_scalar;
+                let weights = random_i16_array(seed + 100);
+
+                scalar::ScalarOps.accumulator_sub(&mut acc_scalar, &weights);
+                super::super::neon::NeonOps.accumulator_sub(&mut acc_neon, &weights);
+                assert_eq!(acc_scalar, acc_neon, "sub mismatch for seed {seed}");
+            }
+        }
+
+        #[test]
+        fn neon_crelu_linear_matches_scalar() {
+            for seed in 1..=10u64 {
+                let stm = random_i16_array(seed);
+                let nstm = random_i16_array(seed + 50);
+                let weights = random_i8_array(seed + 100);
+
+                let scalar_result = scalar_crelu_linear(&stm, &nstm, &weights);
+                let neon_result = super::super::neon::NeonOps.crelu_linear(&stm, &nstm, &weights);
+                assert_eq!(
+                    scalar_result, neon_result,
+                    "crelu_linear mismatch for seed {seed}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn full_forward_consistency() {
         // Verify that the dispatched ops produce the same result as scalar

@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use rage_core::Board;
 use rage_nnue::{NnueNetwork, NnueWeights};
-use rage_search::search::InfoCallback;
+use rage_search::search::{InfoCallback, SearchInfo};
 use rage_search::threads::ThreadPool;
 use rage_search::time::SearchLimits;
 use rage_syzygy::Tablebase;
@@ -88,6 +88,8 @@ struct UciEngine {
     syzygy_probe_limit: u32,
     /// Number of principal variations to report. Default 1.
     multi_pv: usize,
+    /// Whether to show WDL (Win/Draw/Loss) probabilities in info strings.
+    show_wdl: bool,
 }
 
 impl UciEngine {
@@ -120,6 +122,7 @@ impl UciEngine {
             syzygy_probe_depth: 1,
             syzygy_probe_limit: 7,
             multi_pv: 1,
+            show_wdl: false,
         }
     }
 
@@ -202,6 +205,10 @@ impl UciEngine {
             "stop" => self.cmd_stop(),
             "ponderhit" => self.cmd_ponderhit(),
             "setoption" => self.cmd_setoption(&mut tokens),
+            "register" => {
+                println!("registration ok");
+            }
+            "debug" => { /* ignored — no debug output mode */ }
             "quit" => {
                 self.cmd_stop();
                 return true;
@@ -234,6 +241,7 @@ impl UciEngine {
         println!("option name SyzygyPath type string default <empty>");
         println!("option name SyzygyProbeDepth type spin default 1 min 1 max 100");
         println!("option name SyzygyProbeLimit type spin default 7 min 0 max 7");
+        println!("option name UCI_ShowWDL type check default false");
         println!("uciok");
     }
 
@@ -342,6 +350,7 @@ impl UciEngine {
         };
 
         let multi_pv = self.multi_pv;
+        let show_wdl = self.show_wdl;
         let handle = thread::spawn(move || {
             let info_cb: InfoCallback = Box::new(move |info| {
                 let pv_str: String = info
@@ -361,11 +370,20 @@ impl UciEngine {
                 } else {
                     String::new()
                 };
+                let wdl_str = if show_wdl {
+                    let (w, d, l) = info
+                        .wdl
+                        .unwrap_or_else(|| SearchInfo::compute_wdl(info.score));
+                    format!(" wdl {w} {d} {l}")
+                } else {
+                    String::new()
+                };
                 println!(
-                    "info depth {} seldepth {} score {}{} nodes {} nps {} time {} hashfull {}{} pv {}",
+                    "info depth {} seldepth {} score {}{}{} nodes {} nps {} time {} hashfull {}{} pv {}",
                     info.depth,
                     info.seldepth,
                     info.score_string(),
+                    wdl_str,
                     mpv_str,
                     info.nodes,
                     info.nps(),
@@ -499,6 +517,9 @@ impl UciEngine {
                         self.load_syzygy(&path);
                     }
                 }
+            }
+            "uci_showwdl" => {
+                self.show_wdl = value == "true";
             }
             _ => {}
         }

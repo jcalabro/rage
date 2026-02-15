@@ -201,6 +201,7 @@ impl ThreadPool {
                         hashfull: info.hashfull,
                         tbhits: info.tbhits,
                         multipv: info.multipv,
+                        wdl: info.wdl,
                     };
                     cb(&adjusted);
                 });

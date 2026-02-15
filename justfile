@@ -88,6 +88,10 @@ wasm-test:
     cargo check --target wasm32-wasip1 -p rage-core
     cargo test --target wasm32-wasip1 -p rage-nnue -p rage-search
 
+# Generate API documentation
+doc *ARGS:
+    cargo doc --all --no-deps {{ARGS}}
+
 # Verify rage-wasm builds for browser target
 wasm-check:
     cargo check --target wasm32-unknown-unknown -p rage-wasm

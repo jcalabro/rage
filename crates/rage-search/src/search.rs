@@ -71,6 +71,8 @@ pub struct SearchInfo {
     pub tbhits: u64,
     /// 1-indexed multi-PV line number (1 for single-PV).
     pub multipv: usize,
+    /// Win/Draw/Loss probabilities as permille (0-1000). None if not computed.
+    pub wdl: Option<(u32, u32, u32)>,
 }
 
 impl SearchInfo {
@@ -86,6 +88,29 @@ impl SearchInfo {
         } else {
             format!("cp {}", self.score)
         }
+    }
+
+    /// Compute WDL probabilities from an eval score using the logistic model.
+    /// Returns (win, draw, loss) as permille values summing to 1000.
+    pub fn compute_wdl(score: i32) -> (u32, u32, u32) {
+        if score.abs() > MATE_SCORE - 256 {
+            return if score > 0 {
+                (1000, 0, 0)
+            } else {
+                (0, 0, 1000)
+            };
+        }
+
+        // Logistic model: win_rate = 1 / (1 + exp(-score / k))
+        // k ≈ 111 is a standard scaling factor for centipawn-based engines.
+        let k = 111.0_f64;
+        let win = 1.0 / (1.0 + (-score as f64 / k).exp());
+        let loss = 1.0 / (1.0 + (score as f64 / k).exp());
+
+        let w = (win * 1000.0).round() as u32;
+        let l = (loss * 1000.0).round() as u32;
+        let d = 1000u32.saturating_sub(w).saturating_sub(l);
+        (w, d, l)
     }
 
     /// Nodes per second.
@@ -293,6 +318,7 @@ impl Searcher {
         let mut completed_depth = 0u32;
         let mut prev_best_move = Move::NULL;
         let mut stability_count = 0u32;
+        let mut prev_score = INFINITY;
 
         // Syzygy root move filtering: if the root position is in the tablebase,
         // filter out losing moves so the engine only searches winning/drawing lines.
@@ -422,6 +448,7 @@ impl Searcher {
                         hashfull: self.tt.hashfull(),
                         tbhits: self.tbhits,
                         multipv: pv_idx + 1,
+                        wdl: None,
                     });
                 }
             }
@@ -438,13 +465,27 @@ impl Searcher {
                 prev_best_move = best_move;
             }
 
+            // Score instability: large eval swings warrant more search time.
+            // Compute how "unstable" the score is as a percentage multiplier.
+            let score_delta = if prev_score == INFINITY {
+                0
+            } else {
+                (best_score - prev_score).unsigned_abs()
+            };
+            prev_score = best_score;
+
+            // score_delta >= 40cp → score_pct = 130 (use 130% of soft limit)
+            // score_delta == 0   → score_pct = 100 (normal)
+            let score_pct = (100 + (score_delta.min(40) * 30 / 40)) as u64;
+
             // Don't start a new iteration if soft limit reached
             // Apply best-move stability: stable moves use less time
+            // Apply score instability: volatile scores use more time
             if stability_count >= 5 {
-                if tm.soft_limit_reached_fraction(50) {
+                if tm.soft_limit_reached_fraction(50 * 100 / score_pct) {
                     break;
                 }
-            } else if tm.soft_limit_reached() {
+            } else if tm.soft_limit_reached_fraction(score_pct) {
                 break;
             }
 
@@ -701,7 +742,7 @@ impl Searcher {
                     }
 
                     if pc_score >= probcut_beta {
-                        return probcut_beta;
+                        return pc_score;
                     }
                 }
             }
