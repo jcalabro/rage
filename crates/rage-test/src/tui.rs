@@ -29,14 +29,14 @@ pub struct SprtTui {
     progress: Arc<Mutex<Option<SprtProgress>>>,
     stop: Arc<AtomicBool>,
     config_lines: Vec<String>,
-    live_state: Option<Arc<Mutex<LiveGameState>>>,
+    live_states: Option<Arc<Vec<Mutex<LiveGameState>>>>,
 }
 
 impl SprtTui {
     pub fn new(
         stop: Arc<AtomicBool>,
         config_lines: Vec<String>,
-        live_state: Option<Arc<Mutex<LiveGameState>>>,
+        live_states: Option<Arc<Vec<Mutex<LiveGameState>>>>,
     ) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -49,7 +49,7 @@ impl SprtTui {
             progress: Arc::new(Mutex::new(None)),
             stop,
             config_lines,
-            live_state,
+            live_states,
         })
     }
 
@@ -89,10 +89,16 @@ impl SprtTui {
     fn draw(&mut self) -> io::Result<()> {
         let progress = self.progress.lock().ok().and_then(|g| g.clone());
         let config_lines = &self.config_lines;
-        let live_game = self
-            .live_state
+        let live_games: Vec<LiveGameState> = self
+            .live_states
             .as_ref()
-            .and_then(|ls| ls.lock().ok().map(|g| g.clone()));
+            .map(|v| {
+                v.iter()
+                    .filter_map(|m| m.lock().ok().map(|g| g.clone()))
+                    .filter(|g| !g.fen.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -114,17 +120,16 @@ impl SprtTui {
                 .block(Block::default().borders(Borders::ALL).title(" rage-test "));
             frame.render_widget(config_block, chunks[0]);
 
-            // Board (left) + stats (right)
-            let show_board = live_game.is_some() && area.width >= 62;
+            // Board(s) (left) + stats (right)
+            let board_width = board_panel_width(&live_games, chunks[1].height);
+            let show_board = board_width > 0 && area.width >= board_width + 30;
             if show_board {
                 let h_chunks = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Length(30), Constraint::Min(30)])
+                    .constraints([Constraint::Length(board_width), Constraint::Min(30)])
                     .split(chunks[1]);
 
-                if let Some(ref gs) = live_game {
-                    render_board(frame, h_chunks[0], gs);
-                }
+                render_boards(frame, h_chunks[0], &live_games);
 
                 if let Some(ref p) = progress {
                     render_sprt_stats(frame, h_chunks[1], p);
@@ -283,14 +288,14 @@ pub struct EloTui {
     progress: Arc<Mutex<Option<EloProgress>>>,
     stop: Arc<AtomicBool>,
     config_lines: Vec<String>,
-    live_state: Option<Arc<Mutex<LiveGameState>>>,
+    live_states: Option<Arc<Vec<Mutex<LiveGameState>>>>,
 }
 
 impl EloTui {
     pub fn new(
         stop: Arc<AtomicBool>,
         config_lines: Vec<String>,
-        live_state: Option<Arc<Mutex<LiveGameState>>>,
+        live_states: Option<Arc<Vec<Mutex<LiveGameState>>>>,
     ) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -303,7 +308,7 @@ impl EloTui {
             progress: Arc::new(Mutex::new(None)),
             stop,
             config_lines,
-            live_state,
+            live_states,
         })
     }
 
@@ -339,10 +344,16 @@ impl EloTui {
     fn draw(&mut self) -> io::Result<()> {
         let progress = self.progress.lock().ok().and_then(|g| g.clone());
         let config_lines = &self.config_lines;
-        let live_game = self
-            .live_state
+        let live_games: Vec<LiveGameState> = self
+            .live_states
             .as_ref()
-            .and_then(|ls| ls.lock().ok().map(|g| g.clone()));
+            .map(|v| {
+                v.iter()
+                    .filter_map(|m| m.lock().ok().map(|g| g.clone()))
+                    .filter(|g| !g.fen.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -363,16 +374,15 @@ impl EloTui {
                 .block(Block::default().borders(Borders::ALL).title(" rage-test "));
             frame.render_widget(config_block, chunks[0]);
 
-            let show_board = live_game.is_some() && area.width >= 62;
+            let board_width = board_panel_width(&live_games, chunks[1].height);
+            let show_board = board_width > 0 && area.width >= board_width + 30;
             if show_board {
                 let h_chunks = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Length(30), Constraint::Min(30)])
+                    .constraints([Constraint::Length(board_width), Constraint::Min(30)])
                     .split(chunks[1]);
 
-                if let Some(ref gs) = live_game {
-                    render_board(frame, h_chunks[0], gs);
-                }
+                render_boards(frame, h_chunks[0], &live_games);
 
                 if let Some(ref p) = progress {
                     render_elo_stats(frame, h_chunks[1], p);
@@ -524,8 +534,84 @@ impl PlainProgress {
     }
 }
 
-/// Render a live chess board from the current game state.
-fn render_board(frame: &mut ratatui::Frame, area: Rect, state: &LiveGameState) {
+/// Calculate how wide the board panel needs to be for the given games and height.
+/// Returns 0 if there are no games to show.
+fn board_panel_width(games: &[LiveGameState], available_height: u16) -> u16 {
+    if games.is_empty() {
+        return 0;
+    }
+    let board_height = 14u16;
+    let board_width = 30u16;
+    let rows_per_col = (available_height / board_height).max(1) as usize;
+    let cols_needed = games.len().div_ceil(rows_per_col);
+    cols_needed as u16 * board_width
+}
+
+/// Render one or more live chess boards in a grid layout.
+fn render_boards(frame: &mut ratatui::Frame, area: Rect, games: &[LiveGameState]) {
+    if games.is_empty() {
+        return;
+    }
+
+    // Each board needs 14 rows (border + file labels + 8 ranks + info + names)
+    // and ~30 columns wide.
+    let board_height = 14u16;
+    let board_width = 30u16;
+    let rows_per_col = (area.height / board_height).max(1) as usize;
+    let cols_needed = games.len().div_ceil(rows_per_col);
+    let max_cols = (area.width / board_width).max(1) as usize;
+    let num_cols = cols_needed.min(max_cols);
+    let max_boards = num_cols * rows_per_col;
+    let show_count = games.len().min(max_boards);
+
+    if num_cols <= 1 {
+        // Single column — simple vertical stack
+        let constraints: Vec<Constraint> = (0..show_count)
+            .map(|_| Constraint::Length(board_height))
+            .chain(std::iter::once(Constraint::Min(0)))
+            .collect();
+        let v_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+        for (i, state) in games.iter().take(show_count).enumerate() {
+            render_board(frame, v_chunks[i], state, i + 1);
+        }
+    } else {
+        // Multi-column grid
+        let col_constraints: Vec<Constraint> = (0..num_cols)
+            .map(|_| Constraint::Length(board_width))
+            .chain(std::iter::once(Constraint::Min(0)))
+            .collect();
+        let h_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(col_constraints)
+            .split(area);
+
+        for col in 0..num_cols {
+            let start = col * rows_per_col;
+            let end = (start + rows_per_col).min(show_count);
+            if start >= show_count {
+                break;
+            }
+            let col_count = end - start;
+            let row_constraints: Vec<Constraint> = (0..col_count)
+                .map(|_| Constraint::Length(board_height))
+                .chain(std::iter::once(Constraint::Min(0)))
+                .collect();
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(row_constraints)
+                .split(h_chunks[col]);
+            for (row, state) in games[start..end].iter().enumerate() {
+                render_board(frame, v_chunks[row], state, start + row + 1);
+            }
+        }
+    }
+}
+
+/// Render a single live chess board.
+fn render_board(frame: &mut ratatui::Frame, area: Rect, state: &LiveGameState, board_num: usize) {
     let Ok(board) = Board::from_fen(&state.fen) else {
         let err = Paragraph::new("Invalid FEN")
             .block(Block::default().borders(Borders::ALL).title(" Board "));
@@ -583,12 +669,6 @@ fn render_board(frame: &mut ratatui::Frame, area: Rect, state: &LiveGameState) {
         lines.push(Line::from(spans));
     }
 
-    // File labels (bottom)
-    lines.push(Line::from(Span::styled(
-        "   a  b  c  d  e  f  g  h",
-        Style::default().fg(Color::DarkGray),
-    )));
-
     // Info line: move number, last move, eval
     let mut info_parts: Vec<String> = Vec::new();
     if let Some(ref lm) = state.last_move {
@@ -620,8 +700,9 @@ fn render_board(frame: &mut ratatui::Frame, area: Rect, state: &LiveGameState) {
         Style::default().fg(Color::DarkGray),
     )));
 
+    let title = format!(" Game {board_num} ");
     let board_widget =
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Board "));
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(board_widget, area);
 }
 

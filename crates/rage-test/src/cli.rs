@@ -447,21 +447,28 @@ fn run_sprt_tui(
     stop: Arc<AtomicBool>,
     config_lines: Vec<String>,
 ) {
-    let live_state = Arc::new(Mutex::new(LiveGameState {
-        fen: String::new(),
-        last_move: None,
-        move_number: 0,
-        score_cp: None,
-        is_mate_score: false,
-        white_name: String::new(),
-        black_name: String::new(),
-        ply: 0,
-    }));
+    let concurrency = config.match_config.concurrency.max(1) as usize;
+    let live_states: Arc<Vec<Mutex<LiveGameState>>> = Arc::new(
+        (0..concurrency)
+            .map(|_| {
+                Mutex::new(LiveGameState {
+                    fen: String::new(),
+                    last_move: None,
+                    move_number: 0,
+                    score_cp: None,
+                    is_mate_score: false,
+                    white_name: String::new(),
+                    black_name: String::new(),
+                    ply: 0,
+                })
+            })
+            .collect(),
+    );
 
     let tui_result = tui::SprtTui::new(
         Arc::clone(&stop),
         config_lines,
-        Some(Arc::clone(&live_state)),
+        Some(Arc::clone(&live_states)),
     );
     let mut sprt_tui = match tui_result {
         Ok(t) => t,
@@ -491,7 +498,7 @@ fn run_sprt_tui(
                     *guard = Some(progress.clone());
                 }
             },
-            Some(live_state),
+            Some(live_states),
         )
     });
 
@@ -552,21 +559,28 @@ fn run_elo_tui(
     stop: Arc<AtomicBool>,
     config_lines: Vec<String>,
 ) {
-    let live_state = Arc::new(Mutex::new(LiveGameState {
-        fen: String::new(),
-        last_move: None,
-        move_number: 0,
-        score_cp: None,
-        is_mate_score: false,
-        white_name: String::new(),
-        black_name: String::new(),
-        ply: 0,
-    }));
+    let concurrency = config.match_config.concurrency.max(1) as usize;
+    let live_states: Arc<Vec<Mutex<LiveGameState>>> = Arc::new(
+        (0..concurrency)
+            .map(|_| {
+                Mutex::new(LiveGameState {
+                    fen: String::new(),
+                    last_move: None,
+                    move_number: 0,
+                    score_cp: None,
+                    is_mate_score: false,
+                    white_name: String::new(),
+                    black_name: String::new(),
+                    ply: 0,
+                })
+            })
+            .collect(),
+    );
 
     let tui_result = tui::EloTui::new(
         Arc::clone(&stop),
         config_lines,
-        Some(Arc::clone(&live_state)),
+        Some(Arc::clone(&live_states)),
     );
     let mut elo_tui = match tui_result {
         Ok(t) => t,
@@ -594,7 +608,7 @@ fn run_elo_tui(
                     *guard = Some(progress.clone());
                 }
             },
-            Some(live_state),
+            Some(live_states),
         )
     });
 

@@ -36,7 +36,7 @@ pub fn run_match(
     book: &OpeningBook,
     stop: Arc<AtomicBool>,
     on_pair: PairCallback,
-    live_state: Option<Arc<Mutex<LiveGameState>>>,
+    live_states: Option<Arc<Vec<Mutex<LiveGameState>>>>,
 ) -> Vec<PairResult> {
     let concurrency = config.concurrency.max(1) as usize;
     let total_pairs = match mode {
@@ -52,16 +52,18 @@ pub fn run_match(
 
     // Spawn worker threads
     let mut handles = Vec::new();
-    for _worker_id in 0..concurrency {
+    for worker_id in 0..concurrency {
         let config = config.clone();
         let stop = Arc::clone(&stop);
         let pair_counter = Arc::clone(&pair_counter);
         let result_tx = result_tx.clone();
         let book_fens: Vec<String> = (0..book.len()).map(|i| book.get(i).to_string()).collect();
         let book_len = book.len();
-        let live_state = live_state.clone();
+        let live_states = live_states.clone();
 
         let handle = std::thread::spawn(move || {
+            // Each worker gets its own live state slot (if available)
+            let live_slot = live_states.as_ref().and_then(|v| v.get(worker_id));
             worker_loop(
                 &config,
                 &book_fens,
@@ -70,7 +72,7 @@ pub fn run_match(
                 &pair_counter,
                 &stop,
                 &result_tx,
-                live_state.as_deref(),
+                live_slot,
             );
         });
         handles.push(handle);

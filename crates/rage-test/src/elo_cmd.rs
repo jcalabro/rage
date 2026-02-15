@@ -39,7 +39,7 @@ pub fn run_elo_test(
     book: &mut OpeningBook,
     stop: Arc<AtomicBool>,
     progress_cb: impl Fn(&EloProgress) + Send + Sync + 'static,
-    live_state: Option<Arc<Mutex<LiveGameState>>>,
+    live_states: Option<Arc<Vec<Mutex<LiveGameState>>>>,
 ) -> EloReport {
     let start = Instant::now();
     let stats = Arc::new(std::sync::Mutex::new(MatchStats::default()));
@@ -79,7 +79,7 @@ pub fn run_elo_test(
         book,
         stop,
         callback,
-        live_state,
+        live_states,
     );
 
     let Ok(s) = stats.lock() else {

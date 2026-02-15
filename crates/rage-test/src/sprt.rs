@@ -46,7 +46,7 @@ pub fn run_sprt(
     book: &mut OpeningBook,
     stop: Arc<AtomicBool>,
     progress_cb: impl Fn(&SprtProgress) + Send + Sync + 'static,
-    live_state: Option<Arc<Mutex<LiveGameState>>>,
+    live_states: Option<Arc<Vec<Mutex<LiveGameState>>>>,
 ) -> SprtReport {
     let (lower_bound, upper_bound) = stats::sprt_bounds(config.alpha, config.beta);
     let start = Instant::now();
@@ -101,7 +101,7 @@ pub fn run_sprt(
         book,
         stop,
         callback,
-        live_state,
+        live_states,
     );
 
     // Final report
