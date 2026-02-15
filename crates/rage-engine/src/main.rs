@@ -37,13 +37,13 @@ fn parse_evalfile(args: &[String]) -> Option<Arc<NnueNetwork>> {
                         return Some(Arc::new(NnueNetwork::new(weights)));
                     }
                     Err(e) => {
-                        eprintln!("info string failed to load NNUE network: {e}");
-                        return None;
+                        eprintln!("error: failed to load NNUE network from '{path}': {e}");
+                        std::process::exit(1);
                     }
                 }
             }
-            eprintln!("info string --evalfile requires a path argument");
-            return None;
+            eprintln!("error: --evalfile requires a path argument");
+            std::process::exit(1);
         }
         i += 1;
     }
