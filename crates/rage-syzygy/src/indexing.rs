@@ -385,23 +385,6 @@ pub struct GroupData {
     pub factors: Vec<u64>,
 }
 
-/// Determine the leading group length based on material configuration.
-fn leading_group_len(material: &MaterialKey) -> usize {
-    if material.has_pawns() {
-        0
-    } else {
-        let unique = material.unique_pieces();
-        let min_like = material.min_like_man();
-        if unique >= 3 {
-            3
-        } else if unique == 2 {
-            2
-        } else {
-            min_like
-        }
-    }
-}
-
 impl GroupData {
     /// Create GroupData from a piece list, computing group lengths and factors.
     ///
