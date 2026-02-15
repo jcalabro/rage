@@ -7,6 +7,8 @@ mod scalar;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod avx2;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod avx512;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod sse41;
 
 #[cfg(target_arch = "aarch64")]
@@ -52,6 +54,9 @@ pub fn ops() -> &'static dyn SimdOps {
 fn init() -> &'static dyn SimdOps {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
+        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
+            return &avx512::Avx512Ops;
+        }
         if is_x86_feature_detected!("avx2") {
             return &avx2::Avx2Ops;
         }
@@ -131,7 +136,7 @@ mod tests {
         let ops = super::ops();
         let name = ops.name();
         assert!(
-            ["scalar", "sse41", "avx2", "neon", "wasm-simd128"].contains(&name),
+            ["scalar", "sse41", "avx2", "avx512", "neon", "wasm-simd128"].contains(&name),
             "unexpected SIMD tier: {name}"
         );
     }
@@ -252,6 +257,69 @@ mod tests {
                 let avx2_result = super::super::avx2::Avx2Ops.crelu_linear(&stm, &nstm, &weights);
                 assert_eq!(
                     scalar_result, avx2_result,
+                    "crelu_linear mismatch for seed {seed}"
+                );
+            }
+        }
+    }
+
+    // --- AVX-512 tests (x86/x86_64 only) ---
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    mod avx512_tests {
+        use super::*;
+
+        fn has_avx512() -> bool {
+            is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw")
+        }
+
+        #[test]
+        fn avx512_accumulator_add_matches_scalar() {
+            if !has_avx512() {
+                return;
+            }
+            for seed in 1..=10u64 {
+                let mut acc_scalar = random_i16_array(seed);
+                let mut acc_avx512 = acc_scalar;
+                let weights = random_i16_array(seed + 100);
+
+                scalar::ScalarOps.accumulator_add(&mut acc_scalar, &weights);
+                super::super::avx512::Avx512Ops.accumulator_add(&mut acc_avx512, &weights);
+                assert_eq!(acc_scalar, acc_avx512, "add mismatch for seed {seed}");
+            }
+        }
+
+        #[test]
+        fn avx512_accumulator_sub_matches_scalar() {
+            if !has_avx512() {
+                return;
+            }
+            for seed in 1..=10u64 {
+                let mut acc_scalar = random_i16_array(seed);
+                let mut acc_avx512 = acc_scalar;
+                let weights = random_i16_array(seed + 100);
+
+                scalar::ScalarOps.accumulator_sub(&mut acc_scalar, &weights);
+                super::super::avx512::Avx512Ops.accumulator_sub(&mut acc_avx512, &weights);
+                assert_eq!(acc_scalar, acc_avx512, "sub mismatch for seed {seed}");
+            }
+        }
+
+        #[test]
+        fn avx512_crelu_linear_matches_scalar() {
+            if !has_avx512() {
+                return;
+            }
+            for seed in 1..=10u64 {
+                let stm = random_i16_array(seed);
+                let nstm = random_i16_array(seed + 50);
+                let weights = random_i8_array(seed + 100);
+
+                let scalar_result = scalar_crelu_linear(&stm, &nstm, &weights);
+                let avx512_result =
+                    super::super::avx512::Avx512Ops.crelu_linear(&stm, &nstm, &weights);
+                assert_eq!(
+                    scalar_result, avx512_result,
                     "crelu_linear mismatch for seed {seed}"
                 );
             }

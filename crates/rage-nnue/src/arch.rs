@@ -25,10 +25,10 @@ pub const OUTPUT_SCALE: i32 = QA * QB;
 
 // Compile-time assertions for SIMD alignment.
 const _: () = assert!(
-    HIDDEN_SIZE.is_multiple_of(16),
-    "HIDDEN_SIZE must be divisible by 16 for AVX2 SIMD"
+    HIDDEN_SIZE.is_multiple_of(32),
+    "HIDDEN_SIZE must be divisible by 32 for AVX-512 SIMD (also satisfies AVX2/SSE4.1)"
 );
 const _: () = assert!(
-    CRELU_OUTPUT_SIZE.is_multiple_of(16),
-    "CRELU_OUTPUT_SIZE must be divisible by 16 for AVX2 SIMD"
+    CRELU_OUTPUT_SIZE.is_multiple_of(32),
+    "CRELU_OUTPUT_SIZE must be divisible by 32 for AVX-512 SIMD (also satisfies AVX2/SSE4.1)"
 );

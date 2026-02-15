@@ -12,13 +12,20 @@ fn main() {
     // Find the first positional argument (skipping flags and their values)
     let positional = positional_args(&args);
 
-    if positional.first().map(|s| s.as_str()) == Some("bench") {
-        let depth = positional
-            .get(1)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(rage_search::bench::DEFAULT_BENCH_DEPTH);
-        rage_search::bench::run_bench(depth, network);
-        return;
+    match positional.first().map(|s| s.as_str()) {
+        Some("bench") => {
+            let depth = positional
+                .get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(rage_search::bench::DEFAULT_BENCH_DEPTH);
+            rage_search::bench::run_bench(depth, network);
+            return;
+        }
+        Some("perft") => {
+            run_perft(&positional);
+            return;
+        }
+        _ => {}
     }
 
     rage_uci::run(network, syzygy_path);
@@ -60,6 +67,42 @@ fn parse_syzygypath(args: &[String]) -> Option<String> {
         i += 1;
     }
     None
+}
+
+/// Run the perft subcommand: `rage perft <depth> [fen]`
+fn run_perft(positional: &[String]) {
+    let depth: u32 = match positional.get(1).and_then(|s| s.parse().ok()) {
+        Some(d) => d,
+        None => {
+            eprintln!("usage: rage perft <depth> [fen]");
+            std::process::exit(1);
+        }
+    };
+
+    let default_fen = rage_core::Board::STARTPOS_FEN.to_string();
+    let fen = positional.get(2).unwrap_or(&default_fen);
+    let mut board = match rage_core::Board::from_fen(fen) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: invalid FEN '{fen}': {e}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("Position: {fen}");
+    println!("Depth: {depth}\n");
+
+    let start = std::time::Instant::now();
+    let nodes = rage_core::movegen::divide(&mut board, depth);
+    let elapsed = start.elapsed();
+
+    let nps = if elapsed.as_nanos() > 0 {
+        (nodes as u128 * 1_000_000_000) / elapsed.as_nanos()
+    } else {
+        0
+    };
+
+    println!("\nTime: {:.3}s, Nodes/sec: {}", elapsed.as_secs_f64(), nps);
 }
 
 /// Collect positional arguments, skipping known flags and their values.

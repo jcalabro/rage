@@ -86,8 +86,9 @@ fn main() {
             evalfile,
         } => {
             let network = evalfile.map(|path| {
-                let weights = NnueWeights::from_file(Path::new(&path))
-                    .unwrap_or_else(|e| panic!("failed to load NNUE weights from {}: {e}", path.display()));
+                let weights = NnueWeights::from_file(Path::new(&path)).unwrap_or_else(|e| {
+                    panic!("failed to load NNUE weights from {}: {e}", path.display())
+                });
                 eprintln!("info string loaded NNUE network from {}", path.display());
                 Arc::new(NnueNetwork::new(weights))
             });
