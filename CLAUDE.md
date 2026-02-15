@@ -10,7 +10,7 @@ Rage is a general purpose chess library and UCI-compliant chess engine written i
 
 All common tasks go through `just` (justfile):
 
-- `just` — format, lint, and test (default)
+- `just` — format, check, lint, and test (default)
 - `just build` — build the project
 - `just test` — run fast tests (skips `#[ignore]` tests)
 - `just test-long` — run all tests including slow perft suites
@@ -19,8 +19,11 @@ All common tasks go through `just` (justfile):
 - `just lint` — run clippy with `-D warnings`
 - `just fmt` — format code with rustfmt
 - `just run` — build and run
+- `just run` — build in check mode
 
 Toolchain: Rust 1.93.1. Install with `just install-tools`.
+
+Before every commit, be sure to run the plain `just` command.
 
 ## Architecture
 

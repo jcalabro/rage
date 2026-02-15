@@ -18,6 +18,8 @@ mod cache;
 #[cfg(not(target_arch = "wasm32"))]
 mod compress;
 #[cfg(not(target_arch = "wasm32"))]
+mod embedded;
+#[cfg(not(target_arch = "wasm32"))]
 mod errors;
 #[cfg(not(target_arch = "wasm32"))]
 mod indexing;
@@ -29,8 +31,6 @@ mod probe;
 mod table;
 #[cfg(not(target_arch = "wasm32"))]
 mod tablebase;
-#[cfg(not(target_arch = "wasm32"))]
-mod embedded;
 
 // Re-exports for non-wasm
 #[cfg(not(target_arch = "wasm32"))]

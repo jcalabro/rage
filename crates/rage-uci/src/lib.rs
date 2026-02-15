@@ -208,6 +208,7 @@ impl UciEngine {
             "d" | "display" => self.cmd_display(),
             "dd" => self.cmd_display_pretty(),
             "eval" => self.cmd_eval(),
+            "push" => self.cmd_push(&mut tokens),
             "perft" => self.cmd_perft(&mut tokens),
             "compiler" => self.cmd_compiler(),
             "help" => self.cmd_help(),
@@ -486,6 +487,23 @@ impl UciEngine {
 
     // --- Debug commands ---
 
+    fn cmd_push<'a>(&mut self, tokens: &mut impl Iterator<Item = &'a str>) {
+        let move_str = match tokens.next() {
+            Some(s) => s,
+            None => {
+                println!("Usage: push <move> (e.g. push e2e4)");
+                return;
+            }
+        };
+        match self.board.parse_uci_move(move_str) {
+            Ok(m) => {
+                self.board.make_move(m);
+                self.cmd_display();
+            }
+            Err(e) => println!("Illegal move '{move_str}': {e}"),
+        }
+    }
+
     fn cmd_display(&self) {
         print!("{}", self.board);
         println!("FEN: {}", self.board.to_fen());
@@ -695,6 +713,7 @@ impl UciEngine {
         println!("  SyzygyProbeLimit <N> Max pieces for TB probing (0-7, default 7)");
         println!();
         println!("Debug commands:");
+        println!("  push <move>    Play a move on the board (e.g. push e2e4)");
         println!("  bench [depth]  Run search benchmark (default depth 13)");
         println!("  d / display    Show the current board");
         println!("  dd             Show the board with emoji pieces and colored squares");
