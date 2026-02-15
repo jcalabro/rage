@@ -10,6 +10,7 @@ use rage_nnue::{NnueNetwork, NnueWeights};
 use rage_search::search::InfoCallback;
 use rage_search::threads::ThreadPool;
 use rage_search::time::SearchLimits;
+use rage_syzygy::Tablebase;
 
 const ENGINE_NAME: &str = "rage";
 const ENGINE_AUTHOR: &str = "jcalabro";
@@ -23,7 +24,8 @@ const DEFAULT_THREADS: usize = 1;
 /// Run the UCI protocol loop. Blocks until `quit` is received.
 ///
 /// If `network` is provided, it is set on all search threads at startup.
-pub fn run(network: Option<Arc<NnueNetwork>>) {
+/// If `syzygy_path` is provided, Syzygy tablebases are loaded from that path.
+pub fn run(network: Option<Arc<NnueNetwork>>, syzygy_path: Option<String>) {
     let (tx, rx) = mpsc::channel::<String>();
 
     // Spawn stdin reader thread
@@ -46,7 +48,7 @@ pub fn run(network: Option<Arc<NnueNetwork>>) {
         env!("CARGO_PKG_VERSION")
     );
 
-    let mut engine = UciEngine::new(network);
+    let mut engine = UciEngine::new(network, syzygy_path);
 
     while let Ok(line) = rx.recv() {
         let line = line.trim();
@@ -78,13 +80,25 @@ struct UciEngine {
     ponder_offset: Option<Arc<AtomicU64>>,
     /// When pondering started, used to compute the offset on `ponderhit`.
     ponder_start: Option<Instant>,
+    /// Current Syzygy path (for re-loading on setting changes).
+    syzygy_path: Option<String>,
+    /// Minimum search depth before probing tablebases.
+    syzygy_probe_depth: u32,
+    /// Maximum pieces for tablebase probing.
+    syzygy_probe_limit: u32,
 }
 
 impl UciEngine {
-    fn new(network: Option<Arc<NnueNetwork>>) -> Self {
+    fn new(network: Option<Arc<NnueNetwork>>, syzygy_path: Option<String>) -> Self {
         let mut pool = ThreadPool::new(DEFAULT_THREADS, DEFAULT_HASH_MB);
         if let Some(net) = network {
             pool.set_network(Some(net));
+        }
+        if let Some(ref path) = syzygy_path {
+            let tb = Arc::new(Tablebase::new(path));
+            if tb.is_available() {
+                pool.set_syzygy(Some(tb));
+            }
         }
         Self {
             board: Board::starting_position(),
@@ -94,6 +108,9 @@ impl UciEngine {
             ponder_flag: None,
             ponder_offset: None,
             ponder_start: None,
+            syzygy_path,
+            syzygy_probe_depth: 1,
+            syzygy_probe_limit: 7,
         }
     }
 
@@ -119,6 +136,33 @@ impl UciEngine {
             Err(e) => {
                 eprintln!("info string failed to load NNUE network: {e}");
             }
+        }
+    }
+
+    /// Load Syzygy tablebases from the given path.
+    /// The path can be colon or semicolon separated for multiple directories.
+    fn load_syzygy(&mut self, path: &str) {
+        if path.is_empty() || path == "<empty>" {
+            if let Some(ref mut pool) = self.pool {
+                pool.set_syzygy(None);
+            }
+            self.syzygy_path = None;
+            return;
+        }
+
+        let mut tb = Tablebase::new(path);
+        tb.set_probe_depth(self.syzygy_probe_depth);
+        tb.set_probe_limit(self.syzygy_probe_limit);
+        let tb = Arc::new(tb);
+
+        if tb.is_available() {
+            if let Some(ref mut pool) = self.pool {
+                pool.set_syzygy(Some(Arc::clone(&tb)));
+            }
+            self.syzygy_path = Some(path.to_string());
+        } else {
+            eprintln!("info string no Syzygy tables found at {path}");
+            self.syzygy_path = None;
         }
     }
 
@@ -176,6 +220,9 @@ impl UciEngine {
         println!("option name Threads type spin default {DEFAULT_THREADS} min 1 max 256");
         println!("option name Ponder type check default true");
         println!("option name EvalFile type string default <empty>");
+        println!("option name SyzygyPath type string default <empty>");
+        println!("option name SyzygyProbeDepth type spin default 1 min 1 max 100");
+        println!("option name SyzygyProbeLimit type spin default 7 min 0 max 7");
         println!("uciok");
     }
 
@@ -292,8 +339,13 @@ impl UciEngine {
                     .collect::<Vec<_>>()
                     .join(" ");
 
+                let tb_str = if info.tbhits > 0 {
+                    format!(" tbhits {}", info.tbhits)
+                } else {
+                    String::new()
+                };
                 println!(
-                    "info depth {} seldepth {} score {} nodes {} nps {} time {} hashfull {} pv {}",
+                    "info depth {} seldepth {} score {} nodes {} nps {} time {} hashfull {}{} pv {}",
                     info.depth,
                     info.seldepth,
                     info.score_string(),
@@ -301,6 +353,7 @@ impl UciEngine {
                     info.nps(),
                     info.time_ms,
                     info.hashfull,
+                    tb_str,
                     pv_str,
                 );
             });
@@ -399,6 +452,27 @@ impl UciEngine {
             }
             "evalfile" => {
                 self.load_network(&value);
+            }
+            "syzygypath" => {
+                self.load_syzygy(&value);
+            }
+            "syzygyprobedepth" => {
+                if let Ok(d) = value.parse::<u32>() {
+                    self.syzygy_probe_depth = d.clamp(1, 100);
+                    // Reload tablebase with new settings
+                    if let Some(path) = self.syzygy_path.clone() {
+                        self.load_syzygy(&path);
+                    }
+                }
+            }
+            "syzygyprobelimit" => {
+                if let Ok(l) = value.parse::<u32>() {
+                    self.syzygy_probe_limit = l.clamp(0, 7);
+                    // Reload tablebase with new settings
+                    if let Some(path) = self.syzygy_path.clone() {
+                        self.load_syzygy(&path);
+                    }
+                }
             }
             _ => {}
         }
@@ -610,6 +684,9 @@ impl UciEngine {
         println!("  Hash <MB>      Transposition table size (1-1024, default {DEFAULT_HASH_MB})");
         println!("  Threads <N>    Number of search threads (1-256, default {DEFAULT_THREADS})");
         println!("  EvalFile <path> Load NNUE network from file (empty to clear)");
+        println!("  SyzygyPath <path> Path to Syzygy tablebases (colon-separated)");
+        println!("  SyzygyProbeDepth <N> Min depth for TB probing (1-100, default 1)");
+        println!("  SyzygyProbeLimit <N> Max pieces for TB probing (0-7, default 7)");
         println!();
         println!("Debug commands:");
         println!("  bench [depth]  Run search benchmark (default depth 13)");
@@ -656,14 +733,14 @@ mod tests {
 
     #[test]
     fn parse_position_startpos() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("position startpos");
         assert_eq!(engine.board.to_fen(), Board::STARTPOS_FEN);
     }
 
     #[test]
     fn parse_position_startpos_moves() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("position startpos moves e2e4 e7e5");
         // Strict EP: no white pawn on d5/f5 to capture, so EP square is "-"
         assert_eq!(
@@ -674,7 +751,7 @@ mod tests {
 
     #[test]
     fn parse_position_fen() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         let fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
         engine.handle_command(&format!("position fen {fen}"));
         assert_eq!(engine.board.to_fen(), fen);
@@ -682,7 +759,7 @@ mod tests {
 
     #[test]
     fn parse_position_fen_with_moves() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command(
             "position fen rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1 moves e7e5",
         );
@@ -695,7 +772,7 @@ mod tests {
 
     #[test]
     fn ucinewgame_resets() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("position startpos moves e2e4");
         engine.handle_command("ucinewgame");
         assert_eq!(engine.board.to_fen(), Board::STARTPOS_FEN);
@@ -703,31 +780,31 @@ mod tests {
 
     #[test]
     fn setoption_hash() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("setoption name Hash value 32");
     }
 
     #[test]
     fn setoption_threads() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("setoption name Threads value 4");
     }
 
     #[test]
     fn quit_returns_true() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         assert!(engine.handle_command("quit"));
     }
 
     #[test]
     fn unknown_command_ignored() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         assert!(!engine.handle_command("foobar"));
     }
 
     #[test]
     fn go_depth_and_stop() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("position startpos");
         engine.handle_command("go depth 3");
         // Stop the search and recover pool
@@ -737,7 +814,7 @@ mod tests {
 
     #[test]
     fn position_with_castling_moves() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         // Play to a position where castling has occurred
         engine
             .handle_command("position startpos moves e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 d2d3 f8e7 e1g1");
@@ -751,7 +828,7 @@ mod tests {
 
     #[test]
     fn position_with_promotion() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         // Position where white pawn promotes
         engine.handle_command("position fen 8/P7/8/8/8/8/8/4K2k w - - 0 1 moves a7a8q");
         let fen = engine.board.to_fen();
@@ -763,7 +840,7 @@ mod tests {
 
     #[test]
     fn multiple_go_commands() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("position startpos");
         engine.handle_command("go depth 2");
         engine.handle_command("stop");
@@ -775,7 +852,7 @@ mod tests {
 
     #[test]
     fn ucinewgame_clears_tt() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("position startpos");
         engine.handle_command("go depth 3");
         engine.handle_command("stop");
@@ -788,7 +865,7 @@ mod tests {
 
     #[test]
     fn empty_go_treated_as_infinite() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("position startpos");
         // "go" with no params = infinite search
         engine.handle_command("go");
@@ -800,7 +877,7 @@ mod tests {
 
     #[test]
     fn invalid_fen_ignored() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         let original_fen = engine.board.to_fen();
         engine.handle_command("position fen totally_invalid_fen");
         // Board should remain unchanged
@@ -809,7 +886,7 @@ mod tests {
 
     #[test]
     fn invalid_move_stops_apply() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         // First move valid, second invalid - should stop at invalid
         engine.handle_command("position startpos moves e2e4 zzzz");
         // Only e2e4 should have been applied
@@ -819,7 +896,7 @@ mod tests {
 
     #[test]
     fn go_ponder_sets_ponder_flag() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("position startpos");
         engine.handle_command("go ponder wtime 60000 btime 60000");
         // Ponder flag should be set
@@ -834,7 +911,7 @@ mod tests {
 
     #[test]
     fn ponderhit_transitions_to_normal_search() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("position startpos");
         engine.handle_command("go ponder wtime 60000 btime 60000");
         // Let it ponder briefly
@@ -852,7 +929,7 @@ mod tests {
 
     #[test]
     fn ponderhit_without_ponder_is_noop() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         // ponderhit when not pondering should do nothing
         engine.handle_command("ponderhit");
         assert!(engine.ponder_flag.is_none());
@@ -860,7 +937,7 @@ mod tests {
 
     #[test]
     fn go_without_ponder_clears_ponder_state() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("position startpos");
         // First do a ponder search
         engine.handle_command("go ponder depth 3");
@@ -888,7 +965,7 @@ mod tests {
     fn engine_constructed_with_network() {
         let weights = rage_nnue::NnueWeights::random(42);
         let network = Arc::new(NnueNetwork::new(weights));
-        let engine = UciEngine::new(Some(network));
+        let engine = UciEngine::new(Some(network), None);
         let pool = engine.pool.as_ref().unwrap();
         assert!(
             pool.network().is_some(),
@@ -898,7 +975,7 @@ mod tests {
 
     #[test]
     fn engine_constructed_without_network() {
-        let engine = UciEngine::new(None);
+        let engine = UciEngine::new(None, None);
         let pool = engine.pool.as_ref().unwrap();
         assert!(
             pool.network().is_none(),
@@ -909,7 +986,7 @@ mod tests {
     #[test]
     fn load_network_from_valid_file() {
         let path = write_test_network("load_valid");
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.load_network(path.to_str().unwrap());
         let pool = engine.pool.as_ref().unwrap();
         assert!(
@@ -921,7 +998,7 @@ mod tests {
 
     #[test]
     fn load_network_invalid_path_graceful() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.load_network("/tmp/does_not_exist_rage_test.nnue");
         // Should not crash, should fall back to no network
         let pool = engine.pool.as_ref().unwrap();
@@ -934,7 +1011,7 @@ mod tests {
     #[test]
     fn load_network_empty_clears_network() {
         let path = write_test_network("load_empty_clear");
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.load_network(path.to_str().unwrap());
         assert!(engine.pool.as_ref().unwrap().network().is_some());
 
@@ -950,7 +1027,7 @@ mod tests {
     #[test]
     fn load_network_empty_tag_clears_network() {
         let path = write_test_network("load_tag_clear");
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.load_network(path.to_str().unwrap());
         assert!(engine.pool.as_ref().unwrap().network().is_some());
 
@@ -966,7 +1043,7 @@ mod tests {
     #[test]
     fn setoption_evalfile_loads_network() {
         let path = write_test_network("setoption_eval");
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command(&format!(
             "setoption name EvalFile value {}",
             path.to_str().unwrap()
@@ -980,7 +1057,7 @@ mod tests {
 
     #[test]
     fn setoption_evalfile_invalid_path_no_crash() {
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.handle_command("setoption name EvalFile value /tmp/nonexistent_rage.nnue");
         assert!(
             engine.pool.as_ref().unwrap().network().is_none(),
@@ -991,7 +1068,7 @@ mod tests {
     #[test]
     fn network_survives_ucinewgame() {
         let path = write_test_network("survives_newgame");
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.load_network(path.to_str().unwrap());
         assert!(engine.pool.as_ref().unwrap().network().is_some());
 
@@ -1006,7 +1083,7 @@ mod tests {
     #[test]
     fn network_survives_thread_change() {
         let path = write_test_network("survives_threads");
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.load_network(path.to_str().unwrap());
 
         engine.handle_command("setoption name Threads value 4");
@@ -1020,7 +1097,7 @@ mod tests {
     #[test]
     fn search_with_loaded_network() {
         let path = write_test_network("search_loaded");
-        let mut engine = UciEngine::new(None);
+        let mut engine = UciEngine::new(None, None);
         engine.load_network(path.to_str().unwrap());
         engine.handle_command("position startpos");
         engine.handle_command("go depth 3");

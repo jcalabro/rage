@@ -4,6 +4,7 @@ use std::thread;
 
 use rage_core::Board;
 use rage_nnue::NnueNetwork;
+use rage_syzygy::Tablebase;
 
 use crate::search::{InfoCallback, SearchResult, Searcher};
 use crate::time::SearchLimits;
@@ -57,7 +58,7 @@ impl ThreadPool {
             for id in self.num_threads..n {
                 let mut s = Searcher::new(Arc::clone(&self.tt));
                 s.thread_id = id;
-                searchers_copy_network(&self.searchers, &mut s);
+                searchers_copy_settings(&self.searchers, &mut s);
                 self.searchers.push(s);
             }
         } else {
@@ -94,6 +95,18 @@ impl ThreadPool {
     /// Get the NNUE network from the first searcher (if any).
     pub fn network(&self) -> Option<&Arc<NnueNetwork>> {
         self.searchers.first().and_then(|s| s.network().as_ref())
+    }
+
+    /// Set the Syzygy tablebase on all searchers.
+    pub fn set_syzygy(&mut self, tb: Option<Arc<Tablebase>>) {
+        for s in &mut self.searchers {
+            s.set_syzygy(tb.clone());
+        }
+    }
+
+    /// Get the Syzygy tablebase from the first searcher (if any).
+    pub fn syzygy(&self) -> Option<&Arc<Tablebase>> {
+        self.searchers.first().and_then(|s| s.syzygy().as_ref())
     }
 
     /// Evaluate the current position with NNUE (if a network is loaded).
@@ -172,6 +185,7 @@ impl ThreadPool {
                     time_ms: info.time_ms,
                     pv: info.pv.clone(),
                     hashfull: info.hashfull,
+                    tbhits: info.tbhits,
                 };
                 cb(&adjusted);
             });
@@ -203,10 +217,11 @@ impl ThreadPool {
     }
 }
 
-/// Copy network from existing searchers to a new one.
-fn searchers_copy_network(existing: &[Searcher], target: &mut Searcher) {
+/// Copy network and syzygy settings from existing searchers to a new one.
+fn searchers_copy_settings(existing: &[Searcher], target: &mut Searcher) {
     if let Some(first) = existing.first() {
         target.set_network(first.network().clone());
+        target.set_syzygy(first.syzygy().clone());
     }
 }
 

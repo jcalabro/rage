@@ -4429,6 +4429,14 @@ version = "0.1.0"
 dependencies = [
  "rage-core",
  "rage-nnue",
+ "rage-syzygy",
+]
+
+[[package]]
+name = "rage-syzygy"
+version = "0.1.0"
+dependencies = [
+ "rage-core",
 ]
 
 [[package]]
@@ -4451,6 +4459,7 @@ dependencies = [
  "rage-core",
  "rage-nnue",
  "rage-search",
+ "rage-syzygy",
 ]
 
 [[package]]

@@ -7,8 +7,9 @@ fn main() {
 
     // Parse --evalfile flag (can appear anywhere before subcommands)
     let network = parse_evalfile(&args);
+    let syzygy_path = parse_syzygypath(&args);
 
-    // Find the first positional argument (skipping --evalfile and its value)
+    // Find the first positional argument (skipping flags and their values)
     let positional = positional_args(&args);
 
     if positional.first().map(|s| s.as_str()) == Some("bench") {
@@ -20,7 +21,7 @@ fn main() {
         return;
     }
 
-    rage_uci::run(network);
+    rage_uci::run(network, syzygy_path);
 }
 
 /// Parse `--evalfile <path>` from the command line arguments.
@@ -49,12 +50,24 @@ fn parse_evalfile(args: &[String]) -> Option<Arc<NnueNetwork>> {
     None
 }
 
-/// Collect positional arguments, skipping `--evalfile <path>`.
+/// Parse `--syzygypath <path>` from the command line arguments.
+fn parse_syzygypath(args: &[String]) -> Option<String> {
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--syzygypath" {
+            return args.get(i + 1).cloned();
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Collect positional arguments, skipping known flags and their values.
 fn positional_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "--evalfile" {
+        if args[i] == "--evalfile" || args[i] == "--syzygypath" {
             i += 2; // skip flag and value
             continue;
         }

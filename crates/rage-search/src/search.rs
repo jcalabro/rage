@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
 
 use rage_core::{Board, Move, MoveList, PieceType};
 use rage_nnue::{Accumulator, NnueNetwork};
+use rage_syzygy::Tablebase;
 
 use crate::eval::{INFINITY, MATE_SCORE, evaluate_pst, piece_value};
 use crate::ordering::{
@@ -67,6 +68,7 @@ pub struct SearchInfo {
     pub time_ms: u64,
     pub pv: Vec<Move>,
     pub hashfull: u32,
+    pub tbhits: u64,
 }
 
 impl SearchInfo {
@@ -122,12 +124,15 @@ pub struct Searcher {
     pv_table: [[Move; MAX_PLY + 1]; MAX_PLY + 1],
     pv_length: [usize; MAX_PLY + 1],
     pub nodes: u64,
+    pub tbhits: u64,
     seldepth: u32,
     stopped: bool,
     /// NNUE network for evaluation. Falls back to PST eval when None.
     network: Option<Arc<NnueNetwork>>,
     /// Per-ply NNUE accumulators for incremental updates.
     accumulators: Vec<Accumulator>,
+    /// Syzygy tablebase for endgame probing. Shared across threads.
+    syzygy: Option<Arc<Tablebase>>,
     /// Thread ID for Lazy SMP depth perturbation. 0 = main thread.
     pub thread_id: usize,
 }
@@ -148,10 +153,12 @@ impl Searcher {
             pv_table: [[Move::NULL; MAX_PLY + 1]; MAX_PLY + 1],
             pv_length: [0; MAX_PLY + 1],
             nodes: 0,
+            tbhits: 0,
             seldepth: 0,
             stopped: false,
             network: None,
             accumulators,
+            syzygy: None,
             thread_id: 0,
         }
     }
@@ -173,6 +180,16 @@ impl Searcher {
     /// Set the NNUE network for evaluation.
     pub fn set_network(&mut self, network: Option<Arc<NnueNetwork>>) {
         self.network = network;
+    }
+
+    /// Get the current Syzygy tablebase (if any).
+    pub fn syzygy(&self) -> &Option<Arc<Tablebase>> {
+        &self.syzygy
+    }
+
+    /// Set the Syzygy tablebase for endgame probing.
+    pub fn set_syzygy(&mut self, tb: Option<Arc<Tablebase>>) {
+        self.syzygy = tb;
     }
 
     /// Evaluate the position using NNUE with accumulator if available, otherwise PST.
@@ -247,6 +264,7 @@ impl Searcher {
     ) -> SearchResult {
         self.tt.new_search();
         self.nodes = 0;
+        self.tbhits = 0;
         self.stopped = false;
         self.killers.clear();
 
@@ -358,6 +376,7 @@ impl Searcher {
                     time_ms: tm.elapsed_ms(),
                     pv: best_pv.clone(),
                     hashfull: self.tt.hashfull(),
+                    tbhits: self.tbhits,
                 });
             }
 
@@ -432,6 +451,39 @@ impl Searcher {
         // Draw detection
         if !is_root && is_draw(board) {
             return 0;
+        }
+
+        // Syzygy tablebase probe
+        if !is_root
+            && let Some(ref tb) = self.syzygy
+            && depth >= tb.probe_depth
+            && board.castling_rights().bits() == 0
+            && board.occupied().popcount() <= tb.probe_limit
+            && let Some(wdl) = rage_syzygy::probe_wdl(board, tb)
+        {
+            self.tbhits += 1;
+            let tb_score = rage_syzygy::wdl_to_score(wdl, ply);
+
+            let tb_bound = match wdl {
+                rage_syzygy::Wdl::Win | rage_syzygy::Wdl::CursedWin => Bound::Lower,
+                rage_syzygy::Wdl::Loss | rage_syzygy::Wdl::BlessedLoss => Bound::Upper,
+                rage_syzygy::Wdl::Draw => Bound::Exact,
+            };
+
+            if tb_bound == Bound::Exact
+                || (tb_bound == Bound::Lower && tb_score >= beta)
+                || (tb_bound == Bound::Upper && tb_score <= alpha)
+            {
+                let hash = board.zobrist_hash();
+                self.tt
+                    .store(hash, Move::NULL, tb_score, depth as u8, tb_bound, ply);
+                return tb_score;
+            }
+
+            // At PV nodes, tighten the window
+            if pv_node && tb_bound == Bound::Lower {
+                alpha = alpha.max(tb_score);
+            }
         }
 
         // Check extension: extend when in check to avoid horizon effect
