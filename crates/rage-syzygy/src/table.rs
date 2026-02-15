@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::compress::PairsData;
+use crate::compress::{PairsData, parse_pairs_data};
 use crate::errors::{Result, SyzygyError};
 use crate::material::MaterialKey;
 
@@ -65,6 +65,8 @@ impl Table {
 
     /// Parse table data (for testing without file I/O).
     pub fn parse(data: Vec<u8>, table_type: TableType, path: &Path) -> Result<Self> {
+        eprintln!("Parsing table {} ({} bytes)", path.display(), data.len());
+
         if data.len() < 16 {
             return Err(SyzygyError::Corrupted(format!(
                 "file too small: {} bytes",
@@ -109,13 +111,35 @@ impl Table {
         let mut pairs = Vec::with_capacity(num_subtables);
 
         if !has_pawns {
-            // Pawnless tables: the embedded tables are special-cased small files
-            // For now, just create stub pairs data (we'll implement proper parsing later)
-            pairs.push(PairsData::single(2)); // All positions are draws (stub)
+            // Pawnless tables: piece data at byte 5, pairs data after alignment
+            // Following Fathom reference: data += be->num + 1; data += (uintptr_t)data & 1;
+            // be->num = num_pieces - 2
+
+            let num_non_king_pieces = (num_pieces as usize) - 2;
+            let mut offset = 5;
+
+            // Skip piece encoding
+            offset += 1 + num_non_king_pieces;
+
+            // Align to even boundary
+            if offset & 1 != 0 {
+                offset += 1;
+            }
+
             eprintln!(
-                "TODO: implement proper pawnless table parsing (file has {} bytes)",
-                data.len()
+                "Pawnless: {} pieces, {} non-king, pairs offset={}",
+                num_pieces, num_non_king_pieces, offset
             );
+            if offset + 10 <= data.len() {
+                eprintln!(
+                    "Bytes at offset: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                    data[offset], data[offset + 1], data[offset + 2], data[offset + 3], data[offset + 4],
+                    data[offset + 5], data[offset + 6], data[offset + 7], data[offset + 8], data[offset + 9]
+                );
+            }
+
+            // For now: all draws (stub)
+            pairs.push(PairsData::single(2));
         } else {
             // Pawn tables: 4 files, each with encoding + pairs data
             // TODO: implement pawn table parsing

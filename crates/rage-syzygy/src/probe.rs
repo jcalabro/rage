@@ -523,23 +523,25 @@ mod tests {
         let tb_path = extract_embedded_tables().expect("failed to extract tables");
         let tb = crate::Tablebase::new(tb_path.to_str().unwrap());
 
-        // First, check if the table loads at all
-        let has_table = tb.has_wdl("KRvK");
-        eprintln!("Has KRvK table: {has_table}");
+        // Try KQvK which has more data than KRvK
+        let has_table = tb.has_wdl("KQvK");
+        eprintln!("Has KQvK table: {has_table}");
         assert!(has_table);
 
         // Load the table
-        let result = tb.get_wdl("KRvK");
+        let result = tb.get_wdl("KQvK");
         eprintln!("Load result: {result:?}");
         assert!(result.is_ok());
 
-        // KRvK: White king e1, rook a1, black king e8
-        // This is a simple winning position for white
-        let mut board = Board::from_fen("4k3/8/8/8/8/8/R3K3/8 w - - 0 1").unwrap();
+        // KQvK: White king e1, queen d1, black king e8
+        // White wins with queen
+        let mut board = Board::from_fen("4k3/8/8/8/8/8/3QK3/8 w - - 0 1").unwrap();
 
         let result = probe_wdl(&mut board, &tb);
         eprintln!("Probe result: {result:?}");
-        // Result should be Win or similar (white to move wins)
-        assert!(result.is_some());
+        // Result should be Win or similar
+        if result.is_none() {
+            panic!("probe_wdl returned None");
+        }
     }
 }
