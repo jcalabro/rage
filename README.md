@@ -34,7 +34,7 @@ just bench
 
 ## Development
 
-`just` with no arguments formats, checks, lints, and tests everything:
+`just` with no arguments formats, checks, lints, and tests everything.
 
 Run a specific test:
 
