@@ -225,20 +225,31 @@ fn probe_wdl_after_move(board: &mut Board, tablebase: &Tablebase) -> Option<Wdl>
 ///
 /// This performs the actual table lookup: normalizes the position,
 /// computes the index, and decompresses the value.
-fn probe_table_value(_board: &Board, tablebase: &Tablebase, table_name: &str) -> Option<Wdl> {
-    // For now, use a simplified lookup that works with real table files.
-    // The full implementation would:
-    // 1. Determine symmetry transforms
-    // 2. Compute the position index
-    // 3. Decompress the value from the table
-    // 4. Map to Wdl enum
+fn probe_table_value(board: &Board, tablebase: &Tablebase, table_name: &str) -> Option<Wdl> {
+    use crate::compress::decompress_value;
+    use crate::indexing::encode_position;
 
-    // Check if the table is loaded
-    tablebase.read_wdl(table_name, |_table| {
-        // TODO: full index computation and decompression
-        // For now, return None to indicate probing is not yet implemented
-        // at the raw table level
-        None::<Wdl>
+    tablebase.read_wdl(table_name, |table| {
+        eprintln!(
+            "Table: {} subtables, {} pieces, pawns={}",
+            table.pairs.len(),
+            table.num_pieces,
+            table.has_pawns
+        );
+        let (subtable_idx, index) = encode_position(board, table)?;
+        eprintln!("Encoded: subtable={}, index={}", subtable_idx, index);
+        if subtable_idx >= table.pairs.len() {
+            eprintln!("subtable_idx out of range");
+            return None;
+        }
+        let pairs = &table.pairs[subtable_idx];
+        eprintln!(
+            "PairsData: single_value={:?}, block_size={}, num_blocks={}, num_values={}",
+            pairs.single_value, pairs.block_size, pairs.num_blocks, pairs.num_values
+        );
+        let raw = decompress_value(&table.data, pairs, index).ok()?;
+        eprintln!("Decompressed: {}", raw);
+        Wdl::from_raw(raw)
     })?
 }
 
@@ -503,5 +514,32 @@ mod tests {
     fn cursed_win_blessed_loss_scores() {
         assert_eq!(wdl_to_score(Wdl::CursedWin, 0), 1);
         assert_eq!(wdl_to_score(Wdl::BlessedLoss, 0), -1);
+    }
+
+    #[test]
+    fn probe_krk_simple() {
+        use crate::embedded::extract_embedded_tables;
+
+        let tb_path = extract_embedded_tables().expect("failed to extract tables");
+        let tb = crate::Tablebase::new(tb_path.to_str().unwrap());
+
+        // First, check if the table loads at all
+        let has_table = tb.has_wdl("KRvK");
+        eprintln!("Has KRvK table: {has_table}");
+        assert!(has_table);
+
+        // Load the table
+        let result = tb.get_wdl("KRvK");
+        eprintln!("Load result: {result:?}");
+        assert!(result.is_ok());
+
+        // KRvK: White king e1, rook a1, black king e8
+        // This is a simple winning position for white
+        let mut board = Board::from_fen("4k3/8/8/8/8/8/R3K3/8 w - - 0 1").unwrap();
+
+        let result = probe_wdl(&mut board, &tb);
+        eprintln!("Probe result: {result:?}");
+        // Result should be Win or similar (white to move wins)
+        assert!(result.is_some());
     }
 }

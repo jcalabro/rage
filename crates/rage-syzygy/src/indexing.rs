@@ -325,6 +325,84 @@ pub fn normalize_symmetry(strong_king: Square, has_pawns: bool) -> SymmetryInfo 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Position encoding for table lookup
+// ---------------------------------------------------------------------------
+
+use crate::table::Table;
+use rage_core::{Board, Color, PieceType};
+
+/// Encode a board position for table lookup.
+///
+/// Returns (subtable_index, position_index) or None if the position is invalid.
+/// Currently only handles pawnless tables (pawnless non-split).
+pub fn encode_position(board: &Board, table: &Table) -> Option<(usize, u64)> {
+    if table.has_pawns {
+        // Pawn tables not yet implemented
+        return None;
+    }
+
+    // Determine which side is "strong" (more material)
+    let white_strong = crate::material::MaterialKey::from_board(board).white_is_strong();
+
+    // Get the strong side's king and all other pieces
+    let strong_color = if white_strong {
+        Color::White
+    } else {
+        Color::Black
+    };
+    let weak_color = if white_strong {
+        Color::Black
+    } else {
+        Color::White
+    };
+
+    let strong_king = board.king_square(strong_color);
+    let weak_king = board.king_square(weak_color);
+
+    // Determine symmetry transformations needed to normalize strong king to triangle
+    let flip = TRIANGLE_FLIP[strong_king.index()];
+
+    // Transform king squares
+    let strong_king_transformed = transform_square(strong_king, flip);
+    let weak_king_transformed = transform_square(weak_king, flip);
+
+    // Collect other pieces (not kings), sorted by piece type then by square
+    let mut other_pieces = Vec::new();
+
+    // Iterate piece types: Q, R, B, N (P is not in pawnless tables)
+    for &pt in &[
+        PieceType::Queen,
+        PieceType::Rook,
+        PieceType::Bishop,
+        PieceType::Knight,
+    ] {
+        // Strong side pieces
+        for sq in board.pieces(strong_color, pt) {
+            let transformed = transform_square(sq, flip);
+            other_pieces.push(transformed);
+        }
+        // Weak side pieces
+        for sq in board.pieces(weak_color, pt) {
+            let transformed = transform_square(sq, flip);
+            other_pieces.push(transformed);
+        }
+    }
+
+    // Sort other pieces by square index for combinatorial encoding
+    other_pieces.sort_by_key(|sq| sq.index());
+
+    // Encode using the pawnless encoding function
+    let (position_index, _table_size) = encode_pawnless(
+        strong_king_transformed,
+        weak_king_transformed,
+        &other_pieces,
+    )?;
+
+    // For pawnless non-split, there is only one subtable (index 0)
+    Some((0, position_index))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

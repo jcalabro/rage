@@ -263,7 +263,11 @@ pub fn parse_pairs_data(data: &[u8], flags: u8, num_values: u64) -> Result<(Pair
     }
 
     if data.len() < 10 {
-        return Err(SyzygyError::Corrupted("pairs data too short".into()));
+        eprintln!("debug: pairs data too short: {} bytes", data.len());
+        return Err(SyzygyError::Corrupted(format!(
+            "pairs data too short: {} < 10",
+            data.len()
+        )));
     }
 
     let mut pos = 0;
@@ -281,6 +285,13 @@ pub fn parse_pairs_data(data: &[u8], flags: u8, num_values: u64) -> Result<(Pair
     pos += 2;
 
     let block_size = 1u32 << block_size_shift;
+
+    if block_size_shift > 30 {
+        return Err(SyzygyError::Corrupted(format!(
+            "block_size_shift too large: {}",
+            block_size_shift
+        )));
+    }
 
     // Read Huffman code length distribution
     if pos + num_lengths > data.len() {

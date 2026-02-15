@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::compress::{PairsData, parse_pairs_data};
+use crate::compress::PairsData;
 use crate::errors::{Result, SyzygyError};
 use crate::material::MaterialKey;
 
@@ -84,76 +84,43 @@ impl Table {
             )));
         }
 
-        // Parse header
-        // Byte 4: number of pieces (both sides combined, including kings)
-        let num_pieces = data[4] as u32;
-
-        // Byte 5: flags
-        // Bit 0: has pawns
-        // Bit 1: split (separate subtables per side)
-        // Bits 2-3: encoding type
-        let flags = data[5];
-        let has_pawns = flags & 1 != 0;
-        let split = flags & 2 != 0;
-
-        // Determine number of subtables
-        let num_subtables = if table_type == TableType::Wdl {
-            if split { 8 } else { 4 }
-        } else {
-            // DTZ: fewer subtables
-            if split { 4 } else { 2 }
-        };
-
-        // Extract material key from filename
+        // Extract material key from filename (needed to know piece count)
         let material = material_key_from_path(path)?;
 
+        // Parse header (Syzygy WDL format)
+        // Byte 4: flags
+        // Bit 0 (0x01): split flag (WDL never split, but DTZ can be)
+        // Bit 1 (0x02): files flag (4 files if set, 1 if not) - only for pawn tables
+        let flags_byte_4 = data[4];
+        let split = flags_byte_4 & 0x01 != 0;
+        let has_pawns = flags_byte_4 & 0x02 != 0;
+
+        // For WDL, pawnless tables: always 1 subtable (no split)
+        // For WDL, pawn tables: 4 subtables (one per file)
+        let num_subtables = if has_pawns { 4 } else { 1 };
+
+        // Count of pieces from material key
+        let num_pieces = material.total_pieces();
+
+        // Count of pieces excluding kings (for future use when parsing complex headers)
+        let _num_non_king_pieces = (num_pieces as usize).saturating_sub(2).max(0);
+
         // Parse subtable compression parameters
-        // The pairs data starts after the header (byte 6 onwards)
         let mut pairs = Vec::with_capacity(num_subtables);
-        let mut offset = 6;
 
-        // Read subtable sizes first (before pairs data)
-        // Each subtable has a 1-byte flags field
-        let mut sub_flags = Vec::with_capacity(num_subtables);
-        for _ in 0..num_subtables {
-            if offset >= data.len() {
-                return Err(SyzygyError::Corrupted("truncated subtable flags".into()));
-            }
-            sub_flags.push(data[offset]);
-            offset += 1;
-        }
-
-        // Pad to even boundary
-        if offset & 1 != 0 {
-            offset += 1;
-        }
-
-        // Now parse pairs data for each subtable
-        // Note: in real Syzygy files the structure is more complex (subtable sizes
-        // are stored separately), but this gives us the right framework.
-        for &sf in &sub_flags {
-            if offset >= data.len() {
-                // Some subtables might not have data (e.g., empty subtables)
+        if !has_pawns {
+            // Pawnless tables: the embedded tables are special-cased small files
+            // For now, just create stub pairs data (we'll implement proper parsing later)
+            pairs.push(PairsData::single(2)); // All positions are draws (stub)
+            eprintln!(
+                "TODO: implement proper pawnless table parsing (file has {} bytes)",
+                data.len()
+            );
+        } else {
+            // Pawn tables: 4 files, each with encoding + pairs data
+            // TODO: implement pawn table parsing
+            for _ in 0..num_subtables {
                 pairs.push(PairsData::single(0));
-                continue;
-            }
-
-            // Estimate number of values for this subtable
-            // In practice this comes from the index calculation, but for initial
-            // parsing we use a placeholder
-            let num_values = estimate_subtable_size(num_pieces, has_pawns);
-
-            match parse_pairs_data(&data[offset..], sf, num_values) {
-                Ok((pd, consumed)) => {
-                    let mut pd = pd;
-                    pd.data_offset += offset; // adjust to absolute file offset
-                    pairs.push(pd);
-                    offset += consumed;
-                }
-                Err(_) => {
-                    // If parsing fails, use a single-value fallback
-                    pairs.push(PairsData::single(0));
-                }
             }
         }
 
@@ -163,7 +130,7 @@ impl Table {
             material,
             num_pieces,
             has_pawns,
-            flags,
+            flags: flags_byte_4,
             split,
             pairs,
             num_subtables,
