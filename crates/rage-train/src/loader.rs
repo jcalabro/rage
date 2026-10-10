@@ -1,8 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use burn::tensor::backend::Backend;
-use burn::tensor::{Int, Tensor, TensorData};
+use burn::tensor::{Device, Int, Tensor, TensorData};
 use rage_core::{Color, PieceType, Square};
 use rage_nnue::features::feature_index;
 use rand::Rng;
@@ -14,14 +13,14 @@ use crate::data::{ENTRY_SIZE, TrainingEntry};
 const MAX_ACTIVE: usize = 32;
 
 /// A batch of training data ready for the model.
-pub struct Batch<B: Backend> {
-    pub white_features: Tensor<B, 2, Int>,
-    pub black_features: Tensor<B, 2, Int>,
-    pub white_count: Tensor<B, 1, Int>,
-    pub black_count: Tensor<B, 1, Int>,
-    pub stm: Tensor<B, 1, Int>,
-    pub target_scores: Tensor<B, 2>,
-    pub target_wdl: Tensor<B, 2>,
+pub struct Batch {
+    pub white_features: Tensor<2, Int>,
+    pub black_features: Tensor<2, Int>,
+    pub white_count: Tensor<1, Int>,
+    pub black_count: Tensor<1, Int>,
+    pub stm: Tensor<1, Int>,
+    pub target_scores: Tensor<2>,
+    pub target_wdl: Tensor<2>,
 }
 
 /// Extracted features for a single position (CPU-side, no tensors).
@@ -76,7 +75,7 @@ impl TrainingDataset {
     }
 
     /// Iterate over batches of the given size.
-    pub fn batches<B: Backend>(&self, batch_size: usize, device: &B::Device) -> BatchIter<'_, B> {
+    pub fn batches(&self, batch_size: usize, device: &Device) -> BatchIter<'_> {
         BatchIter {
             dataset: self,
             offset: 0,
@@ -86,15 +85,15 @@ impl TrainingDataset {
     }
 }
 
-pub struct BatchIter<'a, B: Backend> {
+pub struct BatchIter<'a> {
     dataset: &'a TrainingDataset,
     offset: usize,
     batch_size: usize,
-    device: B::Device,
+    device: Device,
 }
 
-impl<B: Backend> Iterator for BatchIter<'_, B> {
-    type Item = Batch<B>;
+impl Iterator for BatchIter<'_> {
+    type Item = Batch;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.offset >= self.dataset.entries.len() {
@@ -110,7 +109,7 @@ impl<B: Backend> Iterator for BatchIter<'_, B> {
             return None;
         }
 
-        Some(entries_to_batch::<B>(slice, &self.device))
+        Some(entries_to_batch(slice, &self.device))
     }
 }
 
@@ -173,7 +172,7 @@ fn extract_features(entry: &TrainingEntry) -> PositionFeatures {
 }
 
 /// Convert a slice of training entries into a Batch of tensors.
-fn entries_to_batch<B: Backend>(entries: &[TrainingEntry], device: &B::Device) -> Batch<B> {
+fn entries_to_batch(entries: &[TrainingEntry], device: &Device) -> Batch {
     let bs = entries.len();
 
     let mut white_feat_data = vec![0i64; bs * MAX_ACTIVE];
@@ -262,15 +261,13 @@ mod tests {
 
     #[test]
     fn batch_creation() {
-        use burn::backend::NdArray;
-
         let board = Board::starting_position();
         let entries: Vec<TrainingEntry> = (0..4)
             .map(|i| TrainingEntry::from_board(&board, i * 10, WdlResult::Win, 0))
             .collect();
 
-        let device = burn::tensor::Device::<NdArray>::default();
-        let batch = entries_to_batch::<NdArray>(&entries, &device);
+        let device = Device::flex();
+        let batch = entries_to_batch(&entries, &device);
 
         assert_eq!(batch.white_features.dims(), [4, MAX_ACTIVE]);
         assert_eq!(batch.black_features.dims(), [4, MAX_ACTIVE]);

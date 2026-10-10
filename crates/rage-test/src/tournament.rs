@@ -84,7 +84,7 @@ pub fn run_tournament(
             s.add_pair(pair);
         });
 
-        book.shuffle(&mut rand::thread_rng());
+        book.shuffle(&mut rand::rng());
 
         let match_stop = Arc::new(AtomicBool::new(false));
         // Mirror the global stop

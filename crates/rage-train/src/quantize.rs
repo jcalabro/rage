@@ -2,8 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use burn::module::Module;
-use burn::record::CompactRecorder;
-use burn::tensor::backend::Backend;
+use burn::tensor::Device;
 use rage_nnue::NnueWeights;
 use rage_nnue::arch::{CRELU_OUTPUT_SIZE, HIDDEN_SIZE, QA, QB, TOTAL_INPUT_FEATURES};
 
@@ -59,10 +58,10 @@ pub fn save_nnue(weights: &NnueWeights, path: &Path) -> std::io::Result<()> {
 }
 
 /// Extract f32 weights from a trained Burn model and quantize to NnueWeights.
-pub fn extract_and_quantize<B: Backend>(model: &HalfKAv2Model<B>) -> NnueWeights {
+pub fn extract_and_quantize(model: &HalfKAv2Model) -> NnueWeights {
     // Feature transformer embedding weights: [TOTAL_INPUT_FEATURES, HIDDEN_SIZE]
     let ft_data = model.ft.weight.val().into_data();
-    let ft_vec: Vec<f32> = ft_data.to_vec().unwrap_or_default();
+    let ft_vec: Vec<f32> = ft_data.try_to_vec().unwrap_or_default();
 
     let mut ft_weights = vec![[0.0f32; HIDDEN_SIZE]; TOTAL_INPUT_FEATURES];
     for i in 0..TOTAL_INPUT_FEATURES {
@@ -77,7 +76,7 @@ pub fn extract_and_quantize<B: Backend>(model: &HalfKAv2Model<B>) -> NnueWeights
     let mut ft_biases = [0.0f32; HIDDEN_SIZE];
     if let Some(ref bias_param) = model.ft_bias.bias {
         let bias_data = bias_param.val().into_data();
-        let bias_vec: Vec<f32> = bias_data.to_vec().unwrap_or_default();
+        let bias_vec: Vec<f32> = bias_data.try_to_vec().unwrap_or_default();
         for (j, &val) in bias_vec.iter().enumerate().take(HIDDEN_SIZE) {
             ft_biases[j] = val;
         }
@@ -85,7 +84,7 @@ pub fn extract_and_quantize<B: Backend>(model: &HalfKAv2Model<B>) -> NnueWeights
 
     // Output layer weights: [1, CRELU_OUTPUT_SIZE] → flatten to [CRELU_OUTPUT_SIZE]
     let out_w_data = model.output.weight.val().into_data();
-    let out_w_vec: Vec<f32> = out_w_data.to_vec().unwrap_or_default();
+    let out_w_vec: Vec<f32> = out_w_data.try_to_vec().unwrap_or_default();
     let mut output_weights = [0.0f32; CRELU_OUTPUT_SIZE];
     for (j, &val) in out_w_vec.iter().enumerate().take(CRELU_OUTPUT_SIZE) {
         output_weights[j] = val;
@@ -94,7 +93,7 @@ pub fn extract_and_quantize<B: Backend>(model: &HalfKAv2Model<B>) -> NnueWeights
     // Output bias: [1] → scalar
     let output_bias = if let Some(ref bias_param) = model.output.bias {
         let data = bias_param.val().into_data();
-        let vec: Vec<f32> = data.to_vec().unwrap_or_default();
+        let vec: Vec<f32> = data.try_to_vec().unwrap_or_default();
         vec.first().copied().unwrap_or(0.0)
     } else {
         0.0
@@ -104,14 +103,14 @@ pub fn extract_and_quantize<B: Backend>(model: &HalfKAv2Model<B>) -> NnueWeights
 }
 
 /// Load a Burn model checkpoint and quantize it to a .nnue file.
-pub fn load_and_quantize<B: Backend>(
+pub fn load_and_quantize(
     model_path: &Path,
     output_path: &Path,
-    device: &B::Device,
+    device: &Device,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let model: HalfKAv2Model<B> = HalfKAv2Config::new()
+    let model: HalfKAv2Model = HalfKAv2Config::new()
         .init(device)
-        .load_file(model_path, &CompactRecorder::new(), device)
+        .try_load_file(model_path)
         .map_err(|e| format!("Failed to load model checkpoint: {e}"))?;
 
     let weights = extract_and_quantize(&model);

@@ -2,10 +2,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use burn::module::Module;
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::record::CompactRecorder;
-use burn::tensor::Tensor;
-use burn::tensor::backend::AutodiffBackend;
+use burn::optim::{AdamConfig, GradientsParams};
+use burn::tensor::{Device, Tensor};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
@@ -46,12 +44,12 @@ const SIGMOID_SCALE: f64 = 1.0 / 400.0;
 /// - `target_scores`: [batch, 1] search scores (in centipawns)
 /// - `target_wdl`: [batch, 1] game result (0=loss, 0.5=draw, 1=win)
 /// - `lambda`: weighting between score MSE and WDL cross-entropy
-pub fn compute_loss<B: AutodiffBackend>(
-    predictions: Tensor<B, 2>,
-    target_scores: Tensor<B, 2>,
-    target_wdl: Tensor<B, 2>,
+pub fn compute_loss(
+    predictions: Tensor<2>,
+    target_scores: Tensor<2>,
+    target_wdl: Tensor<2>,
     lambda: f64,
-) -> Tensor<B, 1> {
+) -> Tensor<1> {
     let device = predictions.device();
     let scale = Tensor::from_floats([[SIGMOID_SCALE as f32]], &device);
 
@@ -80,7 +78,7 @@ pub fn compute_loss<B: AutodiffBackend>(
 }
 
 /// Sigmoid activation function.
-fn activation_sigmoid<B: AutodiffBackend>(x: Tensor<B, 2>) -> Tensor<B, 2> {
+fn activation_sigmoid(x: Tensor<2>) -> Tensor<2> {
     burn::tensor::activation::sigmoid(x)
 }
 
@@ -92,12 +90,15 @@ fn cosine_lr(step: usize, total_steps: usize, lr_max: f64) -> f64 {
 }
 
 /// Run the full training pipeline.
-pub fn train<B: AutodiffBackend>(
+pub fn train(
     config: &TrainConfig,
     data_path: &Path,
     output_dir: &Path,
-    device: &B::Device,
+    device: &Device,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Parameters only track gradients when created on an autodiff device.
+    let device = &device.clone().autodiff();
+
     eprintln!("Loading training data from {}...", data_path.display());
     let mut dataset = TrainingDataset::load(data_path)?;
     eprintln!(
@@ -107,8 +108,8 @@ pub fn train<B: AutodiffBackend>(
         dataset.len() / config.batch_size
     );
 
-    let model: HalfKAv2Model<B> = HalfKAv2Config::new().init(device);
-    let mut optim = AdamConfig::new().init::<B, HalfKAv2Model<B>>();
+    let model: HalfKAv2Model = HalfKAv2Config::new().init(device);
+    let mut optim = AdamConfig::new().init();
 
     let batches_per_epoch = dataset.len() / config.batch_size;
     let total_steps = config.epochs * batches_per_epoch;
@@ -130,7 +131,7 @@ pub fn train<B: AutodiffBackend>(
         let mut epoch_loss = 0.0f64;
         let mut num_batches = 0usize;
 
-        for batch in dataset.batches::<B>(config.batch_size, device) {
+        for batch in dataset.batches(config.batch_size, device) {
             let lr = cosine_lr(global_step, total_steps, config.learning_rate);
 
             let predictions = model.forward(
@@ -152,7 +153,7 @@ pub fn train<B: AutodiffBackend>(
             let loss_val: f64 = loss
                 .clone()
                 .into_data()
-                .to_vec::<f32>()
+                .try_to_vec::<f32>()
                 .map_or(0.0, |v| v.first().copied().unwrap_or(0.0) as f64);
 
             let grads = loss.backward();
@@ -196,7 +197,7 @@ pub fn train<B: AutodiffBackend>(
         let checkpoint_path = output_dir.join(format!("epoch_{}", epoch + 1));
         model
             .clone()
-            .save_file(&checkpoint_path, &CompactRecorder::new())
+            .save_file(&checkpoint_path)
             .map_err(|e| format!("Failed to save checkpoint: {e}"))?;
         eprintln!("  Saved checkpoint to {}", checkpoint_path.display());
     }

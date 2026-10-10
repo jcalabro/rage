@@ -9,7 +9,7 @@ use rage_nnue::NnueNetwork;
 use rage_search::search::Searcher;
 use rage_search::time::SearchLimits;
 use rage_search::tt::TranspositionTable;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use rayon::prelude::*;
 
 use crate::data::{TrainingEntry, WdlResult};
@@ -80,7 +80,7 @@ pub fn generate_data(config: &DatagenConfig, output_path: &Path) -> std::io::Res
         (0..config.num_games)
             .into_par_iter()
             .map(|_| {
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 let positions = play_game(config, config.network.clone(), &mut rng);
 
                 let done = games_completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -136,7 +136,7 @@ fn play_game<R: Rng>(
         if moves.is_empty() {
             break;
         }
-        let idx = rng.gen_range(0..moves.len());
+        let idx = rng.random_range(0..moves.len());
         board.make_move(moves[idx]);
     }
 

@@ -120,27 +120,17 @@ fn main() {
             };
 
             #[cfg(feature = "cuda")]
-            {
-                type MyBackend = burn::backend::Autodiff<burn::backend::Cuda>;
-                let device = burn::backend::cuda::CudaDevice::new(0);
-                if let Err(e) = train::train::<MyBackend>(&config, &data, &output, &device) {
-                    eprintln!("Training error: {e}");
-                }
-            }
-
+            let device = burn::tensor::Device::cuda(0);
             #[cfg(not(feature = "cuda"))]
-            {
-                type MyBackend = burn::backend::Autodiff<burn::backend::NdArray>;
-                let device = burn::backend::ndarray::NdArrayDevice::Cpu;
-                if let Err(e) = train::train::<MyBackend>(&config, &data, &output, &device) {
-                    eprintln!("Training error: {e}");
-                }
+            let device = burn::tensor::Device::flex();
+
+            if let Err(e) = train::train(&config, &data, &output, &device) {
+                eprintln!("Training error: {e}");
             }
         }
         Command::Quantize { model, output } => {
-            type B = burn::backend::NdArray;
-            let device = burn::backend::ndarray::NdArrayDevice::Cpu;
-            if let Err(e) = quantize::load_and_quantize::<B>(&model, &output, &device) {
+            let device = burn::tensor::Device::flex();
+            if let Err(e) = quantize::load_and_quantize(&model, &output, &device) {
                 eprintln!("Quantization error: {e}");
             }
         }

@@ -93,7 +93,7 @@ pub fn run_sprt(
     });
 
     // Shuffle openings
-    book.shuffle(&mut rand::thread_rng());
+    book.shuffle(&mut rand::rng());
 
     let _results = manager::run_match(
         &config.match_config,

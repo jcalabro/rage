@@ -19,7 +19,7 @@ path = "src/main.rs"
 [dependencies]
 rage-core = { path = "../rage-core" }
 clap = { version = "4", features = ["derive"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
-ratatui = "0.29"
-crossterm = "0.28"
-rand = "0.8"
+rusqlite = { version = "0.40", features = ["bundled"] }
+ratatui = "0.30"
+crossterm = "0.29"
+rand = "0.10"

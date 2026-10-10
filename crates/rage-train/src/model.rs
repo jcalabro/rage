@@ -1,7 +1,7 @@
 use burn::module::Module;
 use burn::nn;
 use burn::tensor::activation;
-use burn::tensor::{Int, Tensor, backend::Backend};
+use burn::tensor::{Device, Int, Tensor};
 
 /// Architecture constants matching rage-nnue.
 const TOTAL_INPUT_FEATURES: usize = 7680;
@@ -17,13 +17,13 @@ const MAX_ACTIVE: usize = 32;
 /// During training, the feature transformer uses `nn::Embedding` with manual
 /// sum reduction (equivalent to EmbeddingBag with mode="sum").
 #[derive(Module, Debug)]
-pub struct HalfKAv2Model<B: Backend> {
+pub struct HalfKAv2Model {
     /// Feature transformer embedding table: [TOTAL_INPUT_FEATURES, HIDDEN_SIZE].
-    pub ft: nn::Embedding<B>,
+    pub ft: nn::Embedding,
     /// Feature transformer bias: [HIDDEN_SIZE] via a linear layer.
-    pub ft_bias: nn::Linear<B>,
+    pub ft_bias: nn::Linear,
     /// Output layer: [CRELU_OUTPUT_SIZE] → [1].
-    pub output: nn::Linear<B>,
+    pub output: nn::Linear,
 }
 
 /// Configuration for the HalfKAv2 model.
@@ -37,7 +37,7 @@ pub struct HalfKAv2Config {
 
 impl HalfKAv2Config {
     /// Initialize the model with the given device.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> HalfKAv2Model<B> {
+    pub fn init(&self, device: &Device) -> HalfKAv2Model {
         let ft = nn::EmbeddingConfig::new(self.total_features, self.hidden_size).init(device);
         // Use a linear layer with input_size = hidden_size for the bias only
         let ft_bias = nn::LinearConfig::new(self.hidden_size, self.hidden_size)
@@ -55,7 +55,7 @@ impl HalfKAv2Config {
     }
 }
 
-impl<B: Backend> HalfKAv2Model<B> {
+impl HalfKAv2Model {
     /// Forward pass for a batch of positions.
     ///
     /// Arguments:
@@ -68,12 +68,12 @@ impl<B: Backend> HalfKAv2Model<B> {
     /// Returns: [batch, 1] predicted evaluation score.
     pub fn forward(
         &self,
-        white_features: Tensor<B, 2, Int>,
-        black_features: Tensor<B, 2, Int>,
-        white_count: Tensor<B, 1, Int>,
-        black_count: Tensor<B, 1, Int>,
-        stm: Tensor<B, 1, Int>,
-    ) -> Tensor<B, 2> {
+        white_features: Tensor<2, Int>,
+        black_features: Tensor<2, Int>,
+        white_count: Tensor<1, Int>,
+        black_count: Tensor<1, Int>,
+        stm: Tensor<1, Int>,
+    ) -> Tensor<2> {
         let device = white_features.device();
         let batch_size = white_features.dims()[0];
 
@@ -106,10 +106,10 @@ impl<B: Backend> HalfKAv2Model<B> {
     /// Compute accumulator for one perspective using embedding sum + bias.
     fn accumulate(
         &self,
-        features: &Tensor<B, 2, Int>,
-        count: &Tensor<B, 1, Int>,
-        device: &B::Device,
-    ) -> Tensor<B, 2> {
+        features: &Tensor<2, Int>,
+        count: &Tensor<1, Int>,
+        device: &Device,
+    ) -> Tensor<2> {
         let batch_size = features.dims()[0];
 
         // Look up embeddings: [batch, MAX_ACTIVE, HIDDEN_SIZE]
@@ -117,7 +117,7 @@ impl<B: Backend> HalfKAv2Model<B> {
 
         // Create mask from counts: [batch, MAX_ACTIVE, 1]
         let max_feat = MAX_ACTIVE;
-        let range = Tensor::<B, 1, Int>::arange(0..max_feat as i64, device);
+        let range = Tensor::<1, Int>::arange(0..max_feat as i64, device);
         let range = range.reshape([1, max_feat]); // [1, MAX_ACTIVE]
         let count_expanded = count.clone().reshape([batch_size, 1]); // [batch, 1]
         let mask = range

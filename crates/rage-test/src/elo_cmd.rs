@@ -71,7 +71,7 @@ pub fn run_elo_test(
         progress_cb(&progress);
     });
 
-    book.shuffle(&mut rand::thread_rng());
+    book.shuffle(&mut rand::rng());
 
     let _results = manager::run_match(
         &config.match_config,
