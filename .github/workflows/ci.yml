@@ -8,6 +8,11 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+defaults:
+  run:
+    # Run every step inside the flake's dev shell (toolchain, just, wasmtime, etc.)
+    shell: nix develop --command bash -e {0}
+
 jobs:
   ci:
     name: CI
@@ -15,14 +20,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Installs the toolchain, components, and targets from rust-toolchain.toml
-      - run: rustup toolchain install
+      - uses: cachix/install-nix-action@v31
 
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: extractions/setup-just@v3
-
-      - uses: bytecodealliance/actions/wasmtime/setup@v1
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
 
       - run: just fmt --check
       - run: just lint
