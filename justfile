@@ -1,14 +1,6 @@
 # Formats, lints, and runs all tests
 default: fmt check lint test
 
-# First, install rustup with: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`, then run this
-install-tools:
-    rustup install 1.93.1
-    rustup override set 1.93.1
-    rustup component add clippy rust-analyzer
-    rustup target add wasm32-unknown-unknown wasm32-wasip1
-    cargo install wasm-pack
-
 # Runs the linter
 lint:
     cargo clippy --all -- -D warnings
@@ -74,7 +66,7 @@ history *ARGS:
 
 # --- WebAssembly ---
 
-# Build wasm module (requires wasm-pack: cargo install wasm-pack)
+# Build wasm module
 wasm *ARGS:
     wasm-pack build crates/rage-wasm --target web --out-dir ../../pkg {{ARGS}}
 

@@ -114,12 +114,8 @@ pub fn see(board: &Board, m: Move) -> i32 {
     let mut depth = 1;
     let mut current_attacker_value = see_piece_value(attacker_pt);
 
-    loop {
-        // Find the least valuable attacker for `side` on `to`
-        let Some((attacker_sq, pt)) = least_valuable_attacker(board, to, side, occupied) else {
-            break;
-        };
-
+    // Find the least valuable attacker for `side` on `to`
+    while let Some((attacker_sq, pt)) = least_valuable_attacker(board, to, side, occupied) {
         // Record the gain: capture current piece on the square
         gains[depth] = current_attacker_value - gains[depth - 1];
         current_attacker_value = see_piece_value(pt);

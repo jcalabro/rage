@@ -101,11 +101,7 @@ pub fn run_bench(depth: u32, network: Option<Arc<NnueNetwork>>) -> BenchResult {
     }
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
-    let nps = if elapsed_ms > 0 {
-        total_nodes * 1000 / elapsed_ms
-    } else {
-        0
-    };
+    let nps = (total_nodes * 1000).checked_div(elapsed_ms).unwrap_or(0);
 
     println!("===========================");
     println!("Total time : {elapsed_ms} ms");

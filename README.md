@@ -10,10 +10,10 @@ Uses NNUE evaluation (HalfKAv2 architecture), PVS search with Lazy SMP, and incl
 
 ## Building
 
-Requires Rust 1.93.1 and [just](https://github.com/casey/just).
+The toolchain is pinned in `rust-toolchain.toml`. The easiest way to get everything (Rust, [just](https://github.com/casey/just), wasm-pack, wasmtime) is the Nix flake:
 
 ```
-just install-tools
+nix develop
 just build
 just --list # see all available commands
 ```

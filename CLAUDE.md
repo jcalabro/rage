@@ -21,7 +21,7 @@ All common tasks go through `just` (justfile):
 - `just run` — build and run
 - `just run` — build in check mode
 
-Toolchain: Rust 1.93.1. Install with `just install-tools`.
+Toolchain: Rust 1.99.0, pinned in `rust-toolchain.toml`. `nix develop` provides the toolchain plus just, wasm-pack, and wasmtime.
 
 Before every commit, be sure to run the plain `just` command.
 

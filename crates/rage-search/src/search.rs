@@ -115,11 +115,7 @@ impl SearchInfo {
 
     /// Nodes per second.
     pub fn nps(&self) -> u64 {
-        if self.time_ms == 0 {
-            0
-        } else {
-            self.nodes * 1000 / self.time_ms
-        }
+        (self.nodes * 1000).checked_div(self.time_ms).unwrap_or(0)
     }
 }
 
@@ -915,10 +911,9 @@ impl Searcher {
 
             // PVS: first move gets full window, rest get zero window
             let new_depth = depth - 1 + extension;
-            let score;
-            if move_count == 1 {
+            let score = if move_count == 1 {
                 // First move: full window
-                score = -self.negamax(board, tm, -beta, -alpha, new_depth, ply + 1, true);
+                -self.negamax(board, tm, -beta, -alpha, new_depth, ply + 1, true)
             } else {
                 // Late move reductions
                 let mut reduction = 0u32;
@@ -977,8 +972,8 @@ impl Searcher {
                     s = -self.negamax(board, tm, -beta, -alpha, new_depth, ply + 1, true);
                 }
 
-                score = s;
-            }
+                s
+            };
 
             board.unmake_move(m);
 

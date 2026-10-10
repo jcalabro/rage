@@ -32,3 +32,7 @@ target
 
 /model
 *.bin
+
+# Nix
+/result
+/.direnv

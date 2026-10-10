@@ -15,11 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.93.1"
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown, wasm32-wasip1
+      # Installs the toolchain, components, and targets from rust-toolchain.toml
+      - run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 

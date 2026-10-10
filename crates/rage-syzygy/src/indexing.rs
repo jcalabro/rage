@@ -744,7 +744,6 @@ pub fn encode_position(board: &Board, table: &Table) -> Option<(usize, u64)> {
 
     // Encode remaining groups.
     let mut group_sq = groups.lens[0];
-    let mut next = 1;
     let remaining_pawns = material.white_pawn_count() > 0 && material.black_pawn_count() > 0;
     let mut rp = remaining_pawns;
 
@@ -771,9 +770,8 @@ pub fn encode_position(board: &Board, table: &Table) -> Option<(usize, u64)> {
         }
 
         rp = false;
-        idx += n * groups.factors[next];
+        idx += n * groups.factors[grp_idx];
         group_sq += lens;
-        next += 1;
     }
 
     Some((side_idx, idx))
